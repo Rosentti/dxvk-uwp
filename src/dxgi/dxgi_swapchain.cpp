@@ -511,7 +511,7 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE DxgiSwapChain::SetRotation(
           DXGI_MODE_ROTATION        Rotation) {
     Logger::err("DxgiSwapChain::SetRotation: Not implemented");
-    return E_NOTIMPL;
+    return S_OK;
   }
   
   

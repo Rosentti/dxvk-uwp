@@ -6,6 +6,7 @@
 #include "dxgi_swapchain_dispatcher.h"
 
 #include "../util/util_singleton.h"
+#include <corewindowinterop.h>
 
 namespace dxvk {
 
@@ -262,6 +263,26 @@ namespace dxvk {
           IDXGISwapChain1**     ppSwapChain) {
     InitReturnPtr(ppSwapChain);
     
+    if (!ppSwapChain) {
+        Logger::err("DxgiFactory::CreateSwapChainForHwndBase: ppSwapChain nullptr");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!pDesc) {
+        Logger::err("DxgiFactory::CreateSwapChainForHwndBase: pDesc nullptr");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!hWnd) {
+        Logger::err("DxgiFactory::CreateSwapChainForHwndBase: hWnd nullptr");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!pDevice) {
+        Logger::err("DxgiFactory::CreateSwapChainForHwndBase: pDevice nullptr");
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
     if (!ppSwapChain || !pDesc || !hWnd || !pDevice)
       return DXGI_ERROR_INVALID_CALL;
     
@@ -321,9 +342,31 @@ namespace dxvk {
           IDXGIOutput*          pRestrictToOutput,
           IDXGISwapChain1**     ppSwapChain) {
     InitReturnPtr(ppSwapChain);
-    
-    Logger::err("DxgiFactory::CreateSwapChainForCoreWindow: Not implemented");
-    return E_NOTIMPL;
+    HWND hwnd;
+    HRESULT hr;
+    ICoreWindowInterop* coreWindowInterop;
+
+    hr = pWindow->QueryInterface(__uuidof(ICoreWindowInterop), (void **)&coreWindowInterop);
+    if (SUCCEEDED(hr))
+    {
+        hr = coreWindowInterop->get_WindowHandle(&hwnd);
+        if (SUCCEEDED(hr))
+        {
+            hr = CreateSwapChainForHwndBase(pDevice, hwnd, pDesc, NULL, pRestrictToOutput, ppSwapChain);
+            if (SUCCEEDED(hr)) {
+                return S_OK;
+            }
+
+            Logger::err("DxgiFactory::CreateSwapChainForCoreWindow: Creating swapchain failed");
+            return hr;
+        }
+        Logger::err("DxgiFactory::CreateSwapChainForCoreWindow: Getting HWND failed");
+
+        return hr;
+    }
+
+    Logger::err("DxgiFactory::CreateSwapChainForCoreWindow: No ICoreWindowInterop for provided ICoreWindow");
+    return E_INVALIDARG;
   }
   
   
