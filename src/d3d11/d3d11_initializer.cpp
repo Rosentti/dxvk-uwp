@@ -1,5 +1,6 @@
 #include <cstring>
 
+#include "d3d11_context_imm.h"
 #include "d3d11_device.h"
 #include "d3d11_initializer.h"
 
@@ -9,9 +10,10 @@ namespace dxvk {
           D3D11Device*                pParent)
   : m_parent(pParent),
     m_device(pParent->GetDXVKDevice()),
-    m_context(m_device->createContext(DxvkContextType::Supplementary)) {
-    m_context->beginRecording(
-      m_device->createCommandList());
+    m_stagingBuffer(m_device, StagingBufferSize),
+    m_stagingSignal(new sync::Fence(0)),
+    m_csChunk(m_parent->AllocCsChunk(DxvkCsChunkFlag::SingleUse)) {
+
   }
 
   
@@ -20,12 +22,11 @@ namespace dxvk {
   }
 
 
-  void D3D11Initializer::Flush() {
+  void D3D11Initializer::NotifyContextFlush() {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
-
-    if (m_transferCommands != 0)
-      FlushInternal();
+    NotifyContextFlushLocked();
   }
+
 
   void D3D11Initializer::InitBuffer(
           D3D11Buffer*                pBuffer,
@@ -50,7 +51,7 @@ namespace dxvk {
     else
       InitDeviceLocalTexture(pTexture, pInitialData);
 
-    SyncKeyedMutex(pTexture->GetInterface());
+    SyncSharedTexture(pTexture);
   }
 
 
@@ -61,18 +62,18 @@ namespace dxvk {
     if (counterView == nullptr)
       return;
 
-    auto counterSlice = counterView->slice();
-
     std::lock_guard<dxvk::mutex> lock(m_mutex);
     m_transferCommands += 1;
 
-    const uint32_t zero = 0;
-    m_context->updateBuffer(
-      counterSlice.buffer(),
-      counterSlice.offset(),
-      sizeof(zero), &zero);
-
-    FlushImplicit();
+    EmitCs([
+      cCounterSlice = DxvkBufferSlice(counterView)
+    ] (DxvkContext* ctx) {
+      const uint32_t zero = 0;
+      ctx->updateBuffer(
+        cCounterSlice.buffer(),
+        cCounterSlice.offset(),
+        sizeof(zero), &zero);
+    });
   }
 
 
@@ -81,23 +82,33 @@ namespace dxvk {
     const D3D11_SUBRESOURCE_DATA*     pInitialData) {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
-    DxvkBufferSlice bufferSlice = pBuffer->GetBufferSlice();
+    Rc<DxvkBuffer> buffer = pBuffer->GetBuffer();
 
     if (pInitialData != nullptr && pInitialData->pSysMem != nullptr) {
-      m_transferMemory   += bufferSlice.length();
+      auto stagingSlice = m_stagingBuffer.alloc(buffer->info().size);
+      std::memcpy(stagingSlice.mapPtr(0), pInitialData->pSysMem, stagingSlice.length());
+
       m_transferCommands += 1;
-      
-      m_context->uploadBuffer(
-        bufferSlice.buffer(),
-        pInitialData->pSysMem);
+
+      EmitCs([
+        cBuffer       = buffer,
+        cStagingSlice = std::move(stagingSlice)
+      ] (DxvkContext* ctx) {
+        ctx->uploadBuffer(cBuffer,
+          cStagingSlice.buffer(),
+          cStagingSlice.offset());
+      });
     } else {
       m_transferCommands += 1;
 
-      m_context->initBuffer(
-        bufferSlice.buffer());
+      EmitCs([
+        cBuffer       = buffer
+      ] (DxvkContext* ctx) {
+        ctx->initBuffer(cBuffer);
+      });
     }
 
-    FlushImplicit();
+    ThrottleAllocationLocked();
   }
 
 
@@ -127,6 +138,7 @@ namespace dxvk {
     const D3D11_SUBRESOURCE_DATA*     pInitialData) {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
     
+    // Image migt be null if this is a staging resource
     Rc<DxvkImage> image = pTexture->GetImage();
 
     auto mapMode = pTexture->GetMapMode();
@@ -136,51 +148,62 @@ namespace dxvk {
     auto formatInfo = lookupFormatInfo(packedFormat);
 
     if (pInitialData != nullptr && pInitialData->pSysMem != nullptr) {
-      // pInitialData is an array that stores an entry for
-      // every single subresource. Since we will define all
-      // subresources, this counts as initialization.
-      for (uint32_t layer = 0; layer < desc->ArraySize; layer++) {
-        for (uint32_t level = 0; level < desc->MipLevels; level++) {
-          const uint32_t id = D3D11CalcSubresource(
-            level, layer, desc->MipLevels);
+      // Compute data size for all subresources and allocate staging buffer memory
+      DxvkBufferSlice stagingSlice;
 
-          VkOffset3D mipLevelOffset = { 0, 0, 0 };
-          VkExtent3D mipLevelExtent = pTexture->MipLevelExtent(level);
+      if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+        VkDeviceSize dataSize = 0u;
+
+        for (uint32_t mip = 0; mip < image->info().mipLevels; mip++) {
+          dataSize += image->info().numLayers * align(util::computeImageDataSize(
+            packedFormat, image->mipLevelExtent(mip), formatInfo->aspectMask), CACHE_LINE_SIZE);
+        }
+
+        stagingSlice = m_stagingBuffer.alloc(dataSize);
+      }
+
+      // Copy initial data for each subresource into the staging buffer,
+      // as well as the mapped per-subresource buffers if available.
+      VkDeviceSize dataOffset = 0u;
+
+      for (uint32_t mip = 0; mip < desc->MipLevels; mip++) {
+        for (uint32_t layer = 0; layer < desc->ArraySize; layer++) {
+          uint32_t index = D3D11CalcSubresource(mip, layer, desc->MipLevels);
+          VkExtent3D mipLevelExtent = pTexture->MipLevelExtent(mip);
 
           if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+            VkDeviceSize mipSizePerLayer = util::computeImageDataSize(
+              packedFormat, image->mipLevelExtent(mip), formatInfo->aspectMask);
+
             m_transferCommands += 1;
-            m_transferMemory   += pTexture->GetSubresourceLayout(formatInfo->aspectMask, id).Size;
-            
-            VkImageSubresourceLayers subresourceLayers;
-            subresourceLayers.aspectMask     = formatInfo->aspectMask;
-            subresourceLayers.mipLevel       = level;
-            subresourceLayers.baseArrayLayer = layer;
-            subresourceLayers.layerCount     = 1;
-            
-            if (formatInfo->aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
-              m_context->uploadImage(
-                image, subresourceLayers,
-                pInitialData[id].pSysMem,
-                pInitialData[id].SysMemPitch,
-                pInitialData[id].SysMemSlicePitch);
-            } else {
-              m_context->updateDepthStencilImage(
-                image, subresourceLayers,
-                VkOffset2D { mipLevelOffset.x,     mipLevelOffset.y      },
-                VkExtent2D { mipLevelExtent.width, mipLevelExtent.height },
-                pInitialData[id].pSysMem,
-                pInitialData[id].SysMemPitch,
-                pInitialData[id].SysMemSlicePitch,
-                packedFormat);
-            }
+
+            util::packImageData(stagingSlice.mapPtr(dataOffset),
+              pInitialData[index].pSysMem, pInitialData[index].SysMemPitch, pInitialData[index].SysMemSlicePitch,
+              0, 0, pTexture->GetVkImageType(), mipLevelExtent, 1, formatInfo, formatInfo->aspectMask);
+
+            dataOffset += align(mipSizePerLayer, CACHE_LINE_SIZE);
           }
 
           if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
-            util::packImageData(pTexture->GetMappedBuffer(id)->mapPtr(0),
-              pInitialData[id].pSysMem, pInitialData[id].SysMemPitch, pInitialData[id].SysMemSlicePitch,
+            util::packImageData(pTexture->GetMappedBuffer(index)->mapPtr(0),
+              pInitialData[index].pSysMem, pInitialData[index].SysMemPitch, pInitialData[index].SysMemSlicePitch,
               0, 0, pTexture->GetVkImageType(), mipLevelExtent, 1, formatInfo, formatInfo->aspectMask);
           }
         }
+      }
+
+      // Upload all subresources of the image in one go
+      if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+        EmitCs([
+          cImage        = std::move(image),
+          cStagingSlice = std::move(stagingSlice),
+          cFormat       = packedFormat
+        ] (DxvkContext* ctx) {
+          ctx->uploadImage(cImage,
+            cStagingSlice.buffer(),
+            cStagingSlice.offset(),
+            CACHE_LINE_SIZE, cFormat);
+        });
       }
     } else {
       if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
@@ -189,14 +212,13 @@ namespace dxvk {
         // While the Microsoft docs state that resource contents are
         // undefined if no initial data is provided, some applications
         // expect a resource to be pre-cleared.
-        VkImageSubresourceRange subresources;
-        subresources.aspectMask     = formatInfo->aspectMask;
-        subresources.baseMipLevel   = 0;
-        subresources.levelCount     = desc->MipLevels;
-        subresources.baseArrayLayer = 0;
-        subresources.layerCount     = desc->ArraySize;
-
-        m_context->initImage(image, subresources, VK_IMAGE_LAYOUT_UNDEFINED);
+        EmitCs([
+          cImage = std::move(image)
+        ] (DxvkContext* ctx) {
+          ctx->initImage(cImage,
+            cImage->getAvailableSubresources(),
+            VK_IMAGE_LAYOUT_UNDEFINED);
+        });
       }
 
       if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
@@ -207,7 +229,7 @@ namespace dxvk {
       }
     }
 
-    FlushImplicit();
+    ThrottleAllocationLocked();
   }
 
 
@@ -254,46 +276,113 @@ namespace dxvk {
     // Initialize the image on the GPU
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
-    VkImageSubresourceRange subresources = image->getAvailableSubresources();
-    
-    m_context->initImage(image, subresources, VK_IMAGE_LAYOUT_PREINITIALIZED);
+    EmitCs([
+      cImage = std::move(image)
+    ] (DxvkContext* ctx) {
+      ctx->initImage(cImage,
+        cImage->getAvailableSubresources(),
+        VK_IMAGE_LAYOUT_PREINITIALIZED);
+    });
 
     m_transferCommands += 1;
-    FlushImplicit();
+    ThrottleAllocationLocked();
   }
 
 
   void D3D11Initializer::InitTiledTexture(
           D3D11CommonTexture*         pTexture) {
-    m_context->initSparseImage(pTexture->GetImage());
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
+
+    EmitCs([
+      cImage = pTexture->GetImage()
+    ] (DxvkContext* ctx) {
+      ctx->initSparseImage(cImage);
+    });
 
     m_transferCommands += 1;
-    FlushImplicit();
+    ThrottleAllocationLocked();
   }
 
 
-  void D3D11Initializer::FlushImplicit() {
-    if (m_transferCommands > MaxTransferCommands
-     || m_transferMemory   > MaxTransferMemory)
-      FlushInternal();
+  void D3D11Initializer::ThrottleAllocationLocked() {
+    DxvkStagingBufferStats stats = m_stagingBuffer.getStatistics();
+
+    // If the amount of memory in flight exceeds the limit, stall the
+    // calling thread and wait for some memory to actually get released.
+    VkDeviceSize stagingMemoryInFlight = stats.allocatedTotal - m_stagingSignal->value();
+
+    if (stagingMemoryInFlight > MaxMemoryInFlight) {
+      ExecuteFlushLocked();
+
+      m_stagingSignal->wait(stats.allocatedTotal - MaxMemoryInFlight);
+    } else if (m_transferCommands >= MaxCommandsPerSubmission || stats.allocatedSinceLastReset >= MaxMemoryPerSubmission) {
+      // Flush pending commands if there are a lot of updates in flight
+      // to keep both execution time and staging memory in check.
+      ExecuteFlushLocked();
+    }
   }
 
 
-  void D3D11Initializer::FlushInternal() {
-    m_context->flushCommandList(nullptr);
-    
-    m_transferCommands = 0;
-    m_transferMemory   = 0;
+  void D3D11Initializer::ExecuteFlush() {
+    std::lock_guard lock(m_mutex);
+
+    ExecuteFlushLocked();
   }
 
 
-  void D3D11Initializer::SyncKeyedMutex(ID3D11Resource *pResource) {
-    Com<IDXGIKeyedMutex> keyedMutex;
-    if (pResource->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&keyedMutex)) != S_OK)
+  void D3D11Initializer::ExecuteFlushLocked() {
+    DxvkStagingBufferStats stats = m_stagingBuffer.getStatistics();
+
+    EmitCs([
+      cSignal       = m_stagingSignal,
+      cSignalValue  = stats.allocatedTotal
+    ] (DxvkContext* ctx) {
+      ctx->signal(cSignal, cSignalValue);
+      ctx->flushCommandList(nullptr);
+    });
+
+    FlushCsChunk();
+
+    NotifyContextFlushLocked();
+  }
+
+
+  void D3D11Initializer::SyncSharedTexture(D3D11CommonTexture* pResource) {
+    if (!(pResource->Desc()->MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX | D3D11_RESOURCE_MISC_SHARED_NTHANDLE)))
       return;
 
-    keyedMutex->AcquireSync(0, 0);
-    keyedMutex->ReleaseSync(0);
+    // Ensure that initialization commands are submitted and waited on before
+    // returning control to the application in order to avoid race conditions
+    // in case the texture is used immediately on a secondary device.
+    auto mapMode = pResource->GetMapMode();
+
+    if (mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_NONE
+     || mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER) {
+      ExecuteFlush();
+
+      m_device->waitForResource(*pResource->GetImage(), DxvkAccess::Write);
+    }
+
+    // If a keyed mutex is used, initialize that to the correct state as well.
+    Com<IDXGIKeyedMutex> keyedMutex;
+
+    if (SUCCEEDED(pResource->GetInterface()->QueryInterface(
+        __uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&keyedMutex)))) {
+      keyedMutex->AcquireSync(0, 0);
+      keyedMutex->ReleaseSync(0);
+    }
+  }
+
+
+  void D3D11Initializer::FlushCsChunkLocked() {
+    m_parent->GetContext()->InjectCsChunk(std::move(m_csChunk), false);
+    m_csChunk = m_parent->AllocCsChunk(DxvkCsChunkFlag::SingleUse);
+  }
+
+
+  void D3D11Initializer::NotifyContextFlushLocked() {
+    m_stagingBuffer.reset();
+    m_transferCommands = 0;
   }
 
 }

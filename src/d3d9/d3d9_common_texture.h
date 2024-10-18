@@ -48,6 +48,9 @@ namespace dxvk {
     bool                IsBackBuffer;
     bool                IsAttachmentOnly;
     bool                IsLockable;
+
+    // Additional parameters for ID3D9VkInteropDevice
+    VkImageUsageFlags   ImageUsage = 0;
   };
 
   struct D3D9ColorView {
@@ -545,10 +548,6 @@ namespace dxvk {
 
     BOOL CheckImageSupport(
       const DxvkImageCreateInfo*  pImageInfo,
-            VkImageTiling         Tiling) const;
-
-    VkImageUsageFlags EnableMetaCopyUsage(
-            VkFormat              Format,
             VkImageTiling         Tiling) const;
 
     D3D9_COMMON_TEXTURE_MAP_MODE DetermineMapMode() const;

@@ -391,7 +391,13 @@ namespace dxvk {
       return m_dxvkDevice;
     }
     
-    void FlushInitContext();
+    void FlushInitCommands() {
+      m_initializer->FlushCsChunk();
+    }
+
+    void NotifyContextFlush() {
+      m_initializer->NotifyContextFlush();
+    }
     
     VkPipelineStageFlags GetEnabledShaderStages() const {
       return m_dxvkDevice->getShaderPipelineStages();
@@ -592,7 +598,14 @@ namespace dxvk {
 
     ID3D11ShaderResourceView* HandleToSrvNVX(
             uint32_t                  Handle);
-    
+
+    bool LockImage(
+      const Rc<DxvkImage>&            Image,
+            VkImageUsageFlags         Usage);
+
+    void LockBuffer(
+      const Rc<DxvkBuffer>&           Buffer);
+
     dxvk::mutex m_mapLock;
     std::unordered_map<uint32_t, ID3D11SamplerState*> m_samplerHandleToPtr;
     std::unordered_map<uint32_t, ID3D11ShaderResourceView*> m_srvHandleToPtr;

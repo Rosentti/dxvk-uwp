@@ -76,27 +76,28 @@ namespace dxvk {
           VkFormat                      bufferFormat,
           uint32_t                      specConstantValue,
           VkExtent2D                    macroPixelRun) {
-    DxvkImageViewCreateInfo imageViewInfo;
-    imageViewInfo.type      = VK_IMAGE_VIEW_TYPE_2D;
+    DxvkImageViewKey imageViewInfo;
+    imageViewInfo.viewType  = VK_IMAGE_VIEW_TYPE_2D;
     imageViewInfo.format    = dstImage->info().format;
     imageViewInfo.usage     = VK_IMAGE_USAGE_STORAGE_BIT;
-    imageViewInfo.aspect    = dstSubresource.aspectMask;
-    imageViewInfo.minLevel  = dstSubresource.mipLevel;
-    imageViewInfo.numLevels = 1;
-    imageViewInfo.minLayer  = dstSubresource.baseArrayLayer;
-    imageViewInfo.numLayers = dstSubresource.layerCount;
-    auto tmpImageView = m_device->createImageView(dstImage, imageViewInfo);
+    imageViewInfo.aspects   = dstSubresource.aspectMask;
+    imageViewInfo.mipIndex  = dstSubresource.mipLevel;
+    imageViewInfo.mipCount  = 1;
+    imageViewInfo.layerIndex = dstSubresource.baseArrayLayer;
+    imageViewInfo.layerCount = dstSubresource.layerCount;
+    auto tmpImageView = dstImage->createView(imageViewInfo);
 
     VkExtent3D imageExtent = dstImage->mipLevelExtent(dstSubresource.mipLevel);
     imageExtent = VkExtent3D{ imageExtent.width  / macroPixelRun.width,
                               imageExtent.height / macroPixelRun.height,
                               1 };
 
-    DxvkBufferViewCreateInfo bufferViewInfo;
-    bufferViewInfo.format      = bufferFormat;
-    bufferViewInfo.rangeOffset = srcSlice.offset();
-    bufferViewInfo.rangeLength = srcSlice.length();
-    auto tmpBufferView = m_device->createBufferView(srcSlice.buffer(), bufferViewInfo);
+    DxvkBufferViewKey bufferViewInfo;
+    bufferViewInfo.format = bufferFormat;
+    bufferViewInfo.offset = srcSlice.offset();
+    bufferViewInfo.size = srcSlice.length();
+    bufferViewInfo.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+    auto tmpBufferView = srcSlice.buffer()->createView(bufferViewInfo);
 
     m_context->setSpecConstant(VK_PIPELINE_BIND_POINT_COMPUTE, 0, specConstantValue);
     m_context->bindResourceImageView(VK_SHADER_STAGE_COMPUTE_BIT, BindingIds::Image, std::move(tmpImageView));

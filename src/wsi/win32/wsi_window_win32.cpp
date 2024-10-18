@@ -193,6 +193,7 @@ namespace dxvk::wsi {
       rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
       SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
+    m_lastForegroundTimestamp = 0;
     return true;
   }
 
@@ -251,6 +252,21 @@ namespace dxvk::wsi {
 
   bool Win32WsiDriver::isWindow(HWND hWindow) {
     return ::IsWindow(hWindow);
+  }
+
+
+  bool Win32WsiDriver::isMinimized(HWND hWindow) {
+    return (::GetWindowLongW(hWindow, GWL_STYLE) & WS_MINIMIZE) != 0;
+  }
+
+
+  bool Win32WsiDriver::isOccluded(HWND hWindow) {
+    if (::GetForegroundWindow() == hWindow)
+    {
+      m_lastForegroundTimestamp = GetTickCount64();
+      return false;
+    }
+    return m_lastForegroundTimestamp && GetTickCount64() - m_lastForegroundTimestamp > 100;
   }
 
 

@@ -58,7 +58,12 @@ namespace dxvk {
   }
 
   // (9<-8) D3DD3DPRESENT_PARAMETERS: Returns D3D9's params given an input for D3D8
-  inline d3d9::D3DPRESENT_PARAMETERS ConvertPresentParameters9(const D3DPRESENT_PARAMETERS* pParams) {
+  inline d3d9::D3DPRESENT_PARAMETERS ConvertPresentParameters9(D3DPRESENT_PARAMETERS* pParams) {
+    // A 0 back buffer count needs to be corrected and made visible to the D3D8 application as well
+    pParams->BackBufferCount = std::max(pParams->BackBufferCount, 1u);
+
+    if (pParams->BackBufferFormat == D3DFMT_UNKNOWN)
+      pParams->BackBufferFormat = D3DFMT_X8R8G8B8;
 
     d3d9::D3DPRESENT_PARAMETERS params;
     params.BackBufferWidth = pParams->BackBufferWidth;
@@ -69,7 +74,6 @@ namespace dxvk {
     params.MultiSampleType = d3d9::D3DMULTISAMPLE_TYPE(pParams->MultiSampleType);
     params.MultiSampleQuality = 0; // (D3D8: no MultiSampleQuality), TODO: get a value for this
 
-
     UINT PresentationInterval = pParams->FullScreen_PresentationInterval;
 
     if (pParams->Windowed) {
@@ -77,7 +81,7 @@ namespace dxvk {
       if (unlikely(PresentationInterval != D3DPRESENT_INTERVAL_DEFAULT)) {
         // TODO: what does dx8 do if windowed app sets FullScreen_PresentationInterval?
         Logger::warn(str::format(
-          "D3D8 Application is windowed yet requested FullScreen_PresentationInterval ", PresentationInterval,
+          "D3D8: Application is windowed yet requested FullScreen_PresentationInterval ", PresentationInterval,
           " (should be D3DPRESENT_INTERVAL_DEFAULT). This will be ignored."));
       }
 
@@ -107,7 +111,12 @@ namespace dxvk {
     params.AutoDepthStencilFormat = d3d9::D3DFORMAT(pParams->AutoDepthStencilFormat);
     params.Flags = pParams->Flags;
 
-    params.FullScreen_RefreshRateInHz = pParams->FullScreen_RefreshRateInHz;
+    // D3DPRESENT_RATE_UNLIMITED is unsupported, use D3DPRESENT_RATE_DEFAULT (or 0)
+    if (unlikely(pParams->FullScreen_RefreshRateInHz == D3DPRESENT_RATE_UNLIMITED)) {
+      params.FullScreen_RefreshRateInHz = D3DPRESENT_RATE_DEFAULT;
+    } else {
+      params.FullScreen_RefreshRateInHz = pParams->FullScreen_RefreshRateInHz;
+    }
 
     // FullScreen_PresentationInterval -> PresentationInterval
     params.PresentationInterval = PresentationInterval;

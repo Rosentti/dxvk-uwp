@@ -20,6 +20,7 @@ namespace dxvk {
     m_maxImplicitDiscardSize(pParent->GetOptions()->maxImplicitDiscardSize),
     m_submissionFence(new sync::CallbackFence()),
     m_flushTracker(pParent->GetOptions()->reproducibleCommandStream),
+    m_stagingBufferFence(new sync::Fence(0)),
     m_multithread(this, false, pParent->GetOptions()->enableContextLock),
     m_videoContext(this, Device) {
     EmitCs([
@@ -30,6 +31,10 @@ namespace dxvk {
 
       ctx->setBarrierControl(cBarrierControlFlags);
     });
+
+    // Stall here so that external submissions to the
+    // CS thread can actually access the command list
+    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
     
     ClearState();
   }
@@ -332,24 +337,23 @@ namespace dxvk {
       // Allocate a new backing slice for the buffer and set
       // it as the 'new' mapped slice. This assumes that the
       // only way to invalidate a buffer is by mapping it.
-      auto physSlice = pResource->DiscardSlice();
-      pMappedResource->pData      = physSlice.mapPtr;
+      auto bufferSlice = pResource->DiscardSlice(&m_allocationCache);
+      pMappedResource->pData      = bufferSlice->mapPtr();
       pMappedResource->RowPitch   = bufferSize;
       pMappedResource->DepthPitch = bufferSize;
       
       EmitCs([
         cBuffer      = pResource->GetBuffer(),
-        cBufferSlice = physSlice
-      ] (DxvkContext* ctx) {
-        ctx->invalidateBuffer(cBuffer, cBufferSlice);
+        cBufferSlice = std::move(bufferSlice)
+      ] (DxvkContext* ctx) mutable {
+        ctx->invalidateBuffer(cBuffer, std::move(cBufferSlice));
       });
 
       return S_OK;
     } else if (likely(MapType == D3D11_MAP_WRITE_NO_OVERWRITE)) {
       // Put this on a fast path without any extra checks since it's
       // a somewhat desired method to partially update large buffers
-      DxvkBufferSliceHandle physSlice = pResource->GetMappedSlice();
-      pMappedResource->pData      = physSlice.mapPtr;
+      pMappedResource->pData      = pResource->GetMapPtr();
       pMappedResource->RowPitch   = bufferSize;
       pMappedResource->DepthPitch = bufferSize;
       return S_OK;
@@ -377,27 +381,28 @@ namespace dxvk {
       }
 
       if (doInvalidatePreserve) {
-        auto prevSlice = pResource->GetMappedSlice();
-        auto physSlice = pResource->DiscardSlice();
+        auto srcPtr = pResource->GetMapPtr();
+
+        auto dstSlice = pResource->DiscardSlice(nullptr);
+        auto dstPtr = dstSlice->mapPtr();
 
         EmitCs([
           cBuffer      = std::move(buffer),
-          cBufferSlice = physSlice
-        ] (DxvkContext* ctx) {
-          ctx->invalidateBuffer(cBuffer, cBufferSlice);
+          cBufferSlice = std::move(dstSlice)
+        ] (DxvkContext* ctx) mutable {
+          ctx->invalidateBuffer(cBuffer, std::move(cBufferSlice));
         });
 
-        std::memcpy(physSlice.mapPtr, prevSlice.mapPtr, physSlice.length);
-        pMappedResource->pData      = physSlice.mapPtr;
+        std::memcpy(dstPtr, srcPtr, bufferSize);
+        pMappedResource->pData      = dstPtr;
         pMappedResource->RowPitch   = bufferSize;
         pMappedResource->DepthPitch = bufferSize;
         return S_OK;
       } else {
-        if (!WaitForResource(buffer, sequenceNumber, MapType, MapFlags))
+        if (!WaitForResource(*buffer, sequenceNumber, MapType, MapFlags))
           return DXGI_ERROR_WAS_STILL_DRAWING;
 
-        DxvkBufferSliceHandle physSlice = pResource->GetMappedSlice();
-        pMappedResource->pData      = physSlice.mapPtr;
+        pMappedResource->pData      = pResource->GetMapPtr();
         pMappedResource->RowPitch   = bufferSize;
         pMappedResource->DepthPitch = bufferSize;
         return S_OK;
@@ -450,7 +455,7 @@ namespace dxvk {
         MapFlags &= ~D3D11_MAP_FLAG_DO_NOT_WAIT;
 
       if (MapType != D3D11_MAP_WRITE_NO_OVERWRITE) {
-        if (!WaitForResource(mappedImage, sequenceNumber, MapType, MapFlags))
+        if (!WaitForResource(*mappedImage, sequenceNumber, MapType, MapFlags))
           return DXGI_ERROR_WAS_STILL_DRAWING;
       }
       
@@ -497,7 +502,7 @@ namespace dxvk {
 
         // Don't implicitly discard large buffers or buffers of images with
         // multiple subresources, as that is likely to cause memory issues.
-        VkDeviceSize bufferSize = pResource->GetMappedSlice(Subresource).length;
+        VkDeviceSize bufferSize = mappedBuffer->info().size;
 
         if (bufferSize >= m_maxImplicitDiscardSize || pResource->CountSubresources() > 1) {
           // Don't check access flags, WaitForResource will return
@@ -522,20 +527,23 @@ namespace dxvk {
       }
 
       if (doFlags & DoInvalidate) {
-        DxvkBufferSliceHandle prevSlice = pResource->GetMappedSlice(Subresource);
-        DxvkBufferSliceHandle physSlice = pResource->DiscardSlice(Subresource);
+        VkDeviceSize bufferSize = mappedBuffer->info().size;
+
+        auto srcSlice = pResource->GetMappedSlice(Subresource);
+        auto dstSlice = pResource->DiscardSlice(Subresource);
+
+        auto srcPtr = srcSlice->mapPtr();
+        mapPtr = dstSlice->mapPtr();
 
         EmitCs([
-          cImageBuffer = mappedBuffer,
-          cBufferSlice = physSlice
-        ] (DxvkContext* ctx) {
-          ctx->invalidateBuffer(cImageBuffer, cBufferSlice);
+          cImageBuffer      = mappedBuffer,
+          cImageBufferSlice = std::move(dstSlice)
+        ] (DxvkContext* ctx) mutable {
+          ctx->invalidateBuffer(cImageBuffer, std::move(cImageBufferSlice));
         });
 
         if (doFlags & DoPreserve)
-          std::memcpy(physSlice.mapPtr, prevSlice.mapPtr, physSlice.length);
-
-        mapPtr = physSlice.mapPtr;
+          std::memcpy(mapPtr, srcPtr, bufferSize);
       } else {
         if (doFlags & DoWait) {
           // We cannot respect DO_NOT_WAIT for buffer-mapped resources since
@@ -544,11 +552,11 @@ namespace dxvk {
             MapFlags &= ~D3D11_MAP_FLAG_DO_NOT_WAIT;
 
           // Wait for mapped buffer to become available
-          if (!WaitForResource(mappedBuffer, sequenceNumber, MapType, MapFlags))
+          if (!WaitForResource(*mappedBuffer, sequenceNumber, MapType, MapFlags))
             return DXGI_ERROR_WAS_STILL_DRAWING;
         }
 
-        mapPtr = pResource->GetMappedSlice(Subresource).mapPtr;
+        mapPtr = pResource->GetMappedSlice(Subresource)->mapPtr();
       }
     }
 
@@ -610,18 +618,8 @@ namespace dxvk {
       VkOffset3D offset = { 0, 0, 0 };
       VkExtent3D extent = cSrcImage->mipLevelExtent(cSrcSubresource.mipLevel);
 
-      if (cSrcSubresource.aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
-        ctx->copyImageToBuffer(cDstBuffer, 0, 0, 0,
-          cSrcImage, cSrcSubresource, offset, extent);
-      } else {
-        ctx->copyDepthStencilImageToPackedBuffer(cDstBuffer, 0,
-          VkOffset2D { 0, 0 },
-          VkExtent2D { extent.width, extent.height },
-          cSrcImage, cSrcSubresource,
-          VkOffset2D { 0, 0 },
-          VkExtent2D { extent.width, extent.height },
-          cPackedFormat);
-      }
+      ctx->copyImageToBuffer(cDstBuffer, 0, 0, 0, cPackedFormat,
+        cSrcImage, cSrcSubresource, offset, extent);
     });
 
     if (pResource->HasSequenceNumber())
@@ -668,20 +666,10 @@ namespace dxvk {
         cSrcDepthPitch  = subresourceLayout.DepthPitch,
         cPackedFormat   = pResource->GetPackedFormat()
       ] (DxvkContext* ctx) {
-        if (cDstSubresource.aspectMask != (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
-          ctx->copyBufferToImage(
-            cDstImage, cDstSubresource, cDstOffset, cDstExtent,
-            cSrcBuffer, cSrcOffset, cSrcRowPitch, cSrcDepthPitch);
-        } else {
-          ctx->copyPackedBufferToDepthStencilImage(
-            cDstImage, cDstSubresource,
-            VkOffset2D { cDstOffset.x, cDstOffset.y },
-            VkExtent2D { cDstExtent.width, cDstExtent.height },
-            cSrcBuffer, 0,
-            VkOffset2D { cDstOffset.x, cDstOffset.y },
-            VkExtent2D { cDstExtent.width, cDstExtent.height },
-            cPackedFormat);
-        }
+        ctx->copyBufferToImage(
+          cDstImage, cDstSubresource, cDstOffset, cDstExtent,
+          cSrcBuffer, cSrcOffset, cSrcRowPitch, cSrcDepthPitch,
+          cPackedFormat);
       });
     }
 
@@ -696,22 +684,23 @@ namespace dxvk {
           UINT                          Length,
     const void*                         pSrcData,
           UINT                          CopyFlags) {
-    DxvkBufferSliceHandle slice;
+    void* mapPtr = nullptr;
 
     if (likely(CopyFlags != D3D11_COPY_NO_OVERWRITE)) {
-      slice = pDstBuffer->DiscardSlice();
+      auto bufferSlice = pDstBuffer->DiscardSlice(&m_allocationCache);
+      mapPtr = bufferSlice->mapPtr();
 
       EmitCs([
         cBuffer      = pDstBuffer->GetBuffer(),
-        cBufferSlice = slice
-      ] (DxvkContext* ctx) {
-        ctx->invalidateBuffer(cBuffer, cBufferSlice);
+        cBufferSlice = std::move(bufferSlice)
+      ] (DxvkContext* ctx) mutable {
+        ctx->invalidateBuffer(cBuffer, std::move(cBufferSlice));
       });
     } else {
-      slice = pDstBuffer->GetMappedSlice();
+      mapPtr = pDstBuffer->GetMapPtr();
     }
 
-    std::memcpy(reinterpret_cast<char*>(slice.mapPtr) + Offset, pSrcData, Length);
+    std::memcpy(reinterpret_cast<char*>(mapPtr) + Offset, pSrcData, Length);
   }
 
 
@@ -840,7 +829,7 @@ namespace dxvk {
 
 
   bool D3D11ImmediateContext::WaitForResource(
-    const Rc<DxvkResource>&                 Resource,
+    const DxvkPagedResource&                Resource,
           uint64_t                          SequenceNumber,
           D3D11_MAP                         MapType,
           UINT                              MapFlags) {
@@ -852,11 +841,11 @@ namespace dxvk {
     // Wait for any CS chunk using the resource to execute, since
     // otherwise we cannot accurately determine if the resource is
     // actually being used by the GPU right now.
-    bool isInUse = Resource->isInUse(access);
+    bool isInUse = Resource.isInUse(access);
 
     if (!isInUse) {
       SynchronizeCsThread(SequenceNumber);
-      isInUse = Resource->isInUse(access);
+      isInUse = Resource.isInUse(access);
     }
 
     if (MapFlags & D3D11_MAP_FLAG_DO_NOT_WAIT) {
@@ -882,7 +871,20 @@ namespace dxvk {
   }
   
   
+  void D3D11ImmediateContext::InjectCsChunk(
+          DxvkCsChunkRef&&            Chunk,
+          bool                        Synchronize) {
+    // Do not update the sequence number when emitting a chunk
+    // from an external source since that would break tracking
+    m_csThread.injectChunk(std::move(Chunk), Synchronize);
+  }
+
+
   void D3D11ImmediateContext::EmitCsChunk(DxvkCsChunkRef&& chunk) {
+    // Flush init commands so that the CS thread
+    // can processe them before the first use.
+    m_parent->FlushInitCommands();
+
     m_csSeqNum = m_csThread.dispatchChunk(std::move(chunk));
   }
 
@@ -938,11 +940,6 @@ namespace dxvk {
     if (synchronizeSubmission)
       m_submitStatus.result = VK_NOT_READY;
 
-    // Flush init context so that new resources are fully initialized
-    // before the app can access them in any way. This has to happen
-    // unconditionally since we may otherwise deadlock on Map.
-    m_parent->FlushInitContext();
-
     // Exit early if there's nothing to do
     if (!GetPendingCsChunks() && !hEvent)
       return;
@@ -959,9 +956,12 @@ namespace dxvk {
     EmitCs<false>([
       cSubmissionFence  = m_submissionFence,
       cSubmissionId     = submissionId,
-      cSubmissionStatus = synchronizeSubmission ? &m_submitStatus : nullptr
+      cSubmissionStatus = synchronizeSubmission ? &m_submitStatus : nullptr,
+      cStagingFence     = m_stagingBufferFence,
+      cStagingMemory    = m_staging.getStatistics().allocatedTotal
     ] (DxvkContext* ctx) {
       ctx->signal(cSubmissionFence, cSubmissionId);
+      ctx->signal(cStagingFence, cStagingMemory);
       ctx->flushCommandList(cSubmissionStatus);
     });
 
@@ -975,6 +975,34 @@ namespace dxvk {
     // Vulkan queue submission is performed.
     if (synchronizeSubmission)
       m_device->waitForSubmission(&m_submitStatus);
+
+    // Free local staging buffer so that we don't
+    // end up with a persistent allocation
+    ResetStagingBuffer();
+
+    // Notify the device that the context has been flushed,
+    // this resets some resource initialization heuristics.
+    m_parent->NotifyContextFlush();
   }
-  
+
+
+  void D3D11ImmediateContext::ThrottleAllocation() {
+    DxvkStagingBufferStats stats = m_staging.getStatistics();
+
+    VkDeviceSize stagingMemoryInFlight = stats.allocatedTotal - m_stagingBufferFence->value();
+
+    if (stagingMemoryInFlight > stats.allocatedSinceLastReset + D3D11Initializer::MaxMemoryInFlight) {
+      // Stall calling thread to avoid situation where we keep growing the staging
+      // buffer indefinitely, but ignore the newly allocated amount so that we don't
+      // wait for the GPU to go fully idle in case of a large allocation.
+      ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, false);
+
+      m_stagingBufferFence->wait(stats.allocatedTotal - stats.allocatedSinceLastReset - D3D11Initializer::MaxMemoryInFlight);
+    } else if (stats.allocatedSinceLastReset >= D3D11Initializer::MaxMemoryPerSubmission) {
+      // Flush somewhat aggressively if there's a lot of memory in flight
+      ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, false);
+    }
+  }
+
+
 }

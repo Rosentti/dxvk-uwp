@@ -26,7 +26,6 @@ namespace dxvk {
     const D3DDISPLAYMODEEX*      pFullscreenDisplayMode)
     : D3D9SwapChainExBase(pDevice)
     , m_device           (pDevice->GetDXVKDevice())
-    , m_context          (m_device->createContext(DxvkContextType::Supplementary))
     , m_frameLatencyCap  (pDevice->GetOptions()->maxFrameLatency)
     , m_dialog           (pDevice->GetOptions()->enableDialogMode)
     , m_swapchainExt     (this) {
@@ -302,6 +301,7 @@ namespace dxvk {
       resolveInfo.mipLevels     = 1;
       resolveInfo.usage         = VK_IMAGE_USAGE_SAMPLED_BIT
                                 | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
                                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
       resolveInfo.stages        = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
                                 | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
@@ -357,6 +357,7 @@ namespace dxvk {
       blitCreateInfo.mipLevels     = 1;
       blitCreateInfo.usage         = VK_IMAGE_USAGE_SAMPLED_BIT
                                    | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                   | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
                                    | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
       blitCreateInfo.stages        = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
                                    | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
@@ -412,17 +413,37 @@ namespace dxvk {
       }
 #endif
 
+      DxvkImageViewKey dstViewInfo;
+      dstViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+      dstViewInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+      dstViewInfo.format = blittedSrc->info().format;
+      dstViewInfo.aspects = blitInfo.dstSubresource.aspectMask;
+      dstViewInfo.mipIndex = blitInfo.dstSubresource.mipLevel;
+      dstViewInfo.mipCount = 1;
+      dstViewInfo.layerIndex = blitInfo.dstSubresource.baseArrayLayer;
+      dstViewInfo.layerCount = blitInfo.dstSubresource.layerCount;
+      dstViewInfo.packedSwizzle = DxvkImageViewKey::packSwizzle(dstTexInfo->GetMapping().Swizzle);
+
+      DxvkImageViewKey srcViewInfo;
+      srcViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+      srcViewInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+      srcViewInfo.format = srcImage->info().format;
+      srcViewInfo.aspects = blitInfo.srcSubresource.aspectMask;
+      srcViewInfo.mipIndex = blitInfo.srcSubresource.mipLevel;
+      srcViewInfo.mipCount = 1;
+      srcViewInfo.layerIndex = blitInfo.srcSubresource.baseArrayLayer;
+      srcViewInfo.layerCount = blitInfo.srcSubresource.layerCount;
+      srcViewInfo.packedSwizzle = DxvkImageViewKey::packSwizzle(srcTexInfo->GetMapping().Swizzle);
+
       m_parent->EmitCs([
-        cDstImage = blittedSrc,
-        cDstMap   = dstTexInfo->GetMapping().Swizzle,
-        cSrcImage = srcImage,
-        cSrcMap   = srcTexInfo->GetMapping().Swizzle,
+        cDstView  = blittedSrc->createView(dstViewInfo),
+        cSrcView  = srcImage->createView(srcViewInfo),
         cBlitInfo = blitInfo
       ] (DxvkContext* ctx) {
-        ctx->blitImage(
-          cDstImage, cDstMap,
-          cSrcImage, cSrcMap,
-          cBlitInfo, VK_FILTER_NEAREST);
+        ctx->blitImageView(
+          cDstView, cBlitInfo.dstOffsets,
+          cSrcView, cBlitInfo.srcOffsets,
+          VK_FILTER_NEAREST);
       });
 
       srcImage = std::move(blittedSrc);
@@ -443,8 +464,8 @@ namespace dxvk {
       cLevelExtent  = srcExtent
     ] (DxvkContext* ctx) {
       ctx->copyImageToBuffer(cBufferSlice.buffer(),
-        cBufferSlice.offset(), 4, 0, cImage,
-        cSubresources, VkOffset3D { 0, 0, 0 },
+        cBufferSlice.offset(), 4, 0, VK_FORMAT_UNDEFINED,
+        cImage, cSubresources, VkOffset3D { 0, 0, 0 },
         cLevelExtent);
     });
 
@@ -727,6 +748,32 @@ namespace dxvk {
   }
 
 
+  void D3D9SwapChainEx::SetCursorTexture(UINT Width, UINT Height, uint8_t* pCursorBitmap) {
+      VkExtent2D cursorSize = { uint32_t(Width), uint32_t(Height) };
+
+      m_blitter->setCursorTexture(
+        cursorSize,
+        VK_FORMAT_B8G8R8A8_UNORM,
+        (void *) pCursorBitmap);
+  }
+
+
+  void D3D9SwapChainEx::SetCursorPosition(int32_t X, int32_t Y, UINT Width, UINT Height) {
+      VkOffset2D cursorPosition = { X, Y };
+      VkExtent2D cursorSize     = { uint32_t(Width), uint32_t(Height) };
+
+      VkRect2D   cursorRect     = { cursorPosition, cursorSize };
+
+      m_parent->EmitCs([
+        cBlitter = m_blitter,
+        cRect    = cursorRect
+      ] (DxvkContext* ctx) {
+        cBlitter->setCursorPos(
+          cRect);
+      });
+  }
+
+
   HRESULT D3D9SwapChainEx::SetDialogBoxMode(bool bEnableDialogs) {
     D3D9DeviceLock lock = m_parent->LockDevice();
 
@@ -793,26 +840,26 @@ namespace dxvk {
 
       // Presentation semaphores and WSI swap chain image
       PresenterInfo info = m_wctx->presenter->info();
-      PresenterSync sync;
+      PresenterSync sync = { };
 
       uint32_t imageIndex = 0;
 
       VkResult status = m_wctx->presenter->acquireNextImage(sync, imageIndex);
 
-      while (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR) {
+      while (status != VK_SUCCESS) {
         RecreateSwapChain();
         
         info = m_wctx->presenter->info();
         status = m_wctx->presenter->acquireNextImage(sync, imageIndex);
+
+        if (status == VK_SUBOPTIMAL_KHR)
+          break;
       }
 
       if (m_hdrMetadata && m_dirtyHdrMetadata) {
         m_wctx->presenter->setHdrMetadata(*m_hdrMetadata);
         m_dirtyHdrMetadata = false;
       }
-
-      m_context->beginRecording(
-        m_device->createCommandList());
 
       VkRect2D srcRect = {
         {  int32_t(m_srcRect.left),                    int32_t(m_srcRect.top)                    },
@@ -822,14 +869,57 @@ namespace dxvk {
         {  int32_t(m_dstRect.left),                    int32_t(m_dstRect.top)                    },
         { uint32_t(m_dstRect.right - m_dstRect.left), uint32_t(m_dstRect.bottom - m_dstRect.top) } };
 
-      m_blitter->presentImage(m_context.ptr(),
-        m_wctx->imageViews.at(imageIndex), dstRect,
-        swapImageView, srcRect);
+      // Bump frame ID
+      if (!i)
+        m_wctx->frameId += 1;
 
-      if (m_hud != nullptr)
-        m_hud->render(m_context, info.format, info.imageExtent);
+      // Present from CS thread so that we don't
+      // have to synchronize with it first.
+      m_presentStatus.result = VK_NOT_READY;
 
-      SubmitPresent(sync, i);
+      m_parent->EmitCs([
+        cPresentStatus  = &m_presentStatus,
+        cDevice         = m_device,
+        cPresenter      = m_wctx->presenter,
+        cBlitter        = m_blitter,
+        cColorSpace     = m_colorspace,
+        cSrcView        = swapImageView,
+        cSrcRect        = srcRect,
+        cDstView        = m_wctx->imageViews.at(imageIndex),
+        cDstRect        = dstRect,
+        cRepeat         = i,
+        cSync           = sync,
+        cHud            = m_hud,
+        cFrameId        = m_wctx->frameId
+      ] (DxvkContext* ctx) {
+        // Blit back buffer onto Vulkan swap chain
+        auto contextObjects = ctx->beginExternalRendering();
+
+        cBlitter->beginPresent(contextObjects,
+          cDstView, cColorSpace, cDstRect,
+          cSrcView, cColorSpace, cSrcRect);
+
+        if (cHud) {
+          if (!cRepeat)
+            cHud->update();
+
+          cHud->render(contextObjects, cDstView, cColorSpace);
+        }
+
+        cBlitter->endPresent(contextObjects, cDstView, cColorSpace);
+
+        // Submit command list and present
+        ctx->synchronizeWsi(cSync);
+        ctx->flushCommandList(nullptr);
+
+        uint64_t frameId = cRepeat ? 0 : cFrameId;
+
+        cDevice->presentImage(cPresenter,
+          cPresenter->info().presentMode,
+          frameId, cPresentStatus);
+      });
+
+      m_parent->FlushCsChunk();
     }
 
     SyncFrameLatency();
@@ -840,39 +930,6 @@ namespace dxvk {
       m_backBuffers[i]->Swap(m_backBuffers[i - 1].ptr());
 
     m_parent->m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
-  }
-
-
-  void D3D9SwapChainEx::SubmitPresent(const PresenterSync& Sync, uint32_t Repeat) {
-    // Bump frame ID
-    if (!Repeat)
-      m_wctx->frameId += 1;
-
-    // Present from CS thread so that we don't
-    // have to synchronize with it first.
-    m_presentStatus.result = VK_NOT_READY;
-
-    m_parent->EmitCs([this,
-      cRepeat      = Repeat,
-      cSync        = Sync,
-      cHud         = m_hud,
-      cPresentMode = m_wctx->presenter->info().presentMode,
-      cFrameId     = m_wctx->frameId,
-      cCommandList = m_context->endRecording()
-    ] (DxvkContext* ctx) {
-      cCommandList->setWsiSemaphores(cSync);
-      m_device->submitCommandList(cCommandList, nullptr);
-
-      if (cHud != nullptr && !cRepeat)
-        cHud->update();
-
-      uint64_t frameId = cRepeat ? 0 : cFrameId;
-
-      m_device->presentImage(m_wctx->presenter,
-        cPresentMode, frameId, &m_presentStatus);
-    });
-
-    m_parent->FlushCsChunk();
   }
 
 
@@ -965,25 +1022,22 @@ namespace dxvk {
     imageInfo.layout      = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     imageInfo.shared      = VK_TRUE;
 
-    DxvkImageViewCreateInfo viewInfo;
-    viewInfo.type         = VK_IMAGE_VIEW_TYPE_2D;
+    DxvkImageViewKey viewInfo;
+    viewInfo.viewType     = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format       = info.format.format;
     viewInfo.usage        = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    viewInfo.aspect       = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.minLevel     = 0;
-    viewInfo.numLevels    = 1;
-    viewInfo.minLayer     = 0;
-    viewInfo.numLayers    = 1;
+    viewInfo.aspects      = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.mipIndex     = 0;
+    viewInfo.mipCount     = 1;
+    viewInfo.layerIndex   = 0;
+    viewInfo.layerCount   = 1;
 
     for (uint32_t i = 0; i < info.imageCount; i++) {
       VkImage imageHandle = m_wctx->presenter->getImage(i).image;
       
-      Rc<DxvkImage> image = new DxvkImage(
-        m_device.ptr(), imageInfo, imageHandle,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-      m_wctx->imageViews[i] = new DxvkImageView(
-        m_device->vkd(), image, viewInfo);
+      Rc<DxvkImage> image = m_device->importImage(imageInfo,
+        imageHandle, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      m_wctx->imageViews[i] = image->createView(viewInfo);
     }
   }
 
@@ -1038,7 +1092,9 @@ namespace dxvk {
     desc.Discard            = FALSE;
     desc.IsBackBuffer       = TRUE;
     desc.IsAttachmentOnly   = FALSE;
-    desc.IsLockable         = (Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER) != 0;
+    // we cannot respect D3DPRESENTFLAG_LOCKABLE_BACKBUFFER here because
+    // we might need to lock for the BlitGDI fallback path
+    desc.IsLockable         = true;
 
     for (uint32_t i = 0; i < NumBuffers; i++) {
       D3D9Surface* surface;
@@ -1054,29 +1110,22 @@ namespace dxvk {
       m_backBuffers.emplace_back(surface);
     }
 
-    auto swapImage = m_backBuffers[0]->GetCommonTexture()->GetImage();
-
     // Initialize the image so that we can use it. Clearing
     // to black prevents garbled output for the first frame.
-    VkImageSubresourceRange subresources;
-    subresources.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    subresources.baseMipLevel   = 0;
-    subresources.levelCount     = 1;
-    subresources.baseArrayLayer = 0;
-    subresources.layerCount     = 1;
+    small_vector<Rc<DxvkImage>, 4> images;
 
-    m_context->beginRecording(
-      m_device->createCommandList());
-    
-    for (uint32_t i = 0; i < m_backBuffers.size(); i++) {
-      m_context->initImage(
-        m_backBuffers[i]->GetCommonTexture()->GetImage(),
-        subresources, VK_IMAGE_LAYOUT_UNDEFINED);
-    }
+    for (size_t i = 0; i < m_backBuffers.size(); i++)
+      images.push_back(m_backBuffers[i]->GetCommonTexture()->GetImage());
 
-    m_device->submitCommandList(
-      m_context->endRecording(),
-      nullptr);
+    m_parent->InjectCs([
+      cImages = std::move(images)
+    ] (DxvkContext* ctx) {
+      for (size_t i = 0; i < cImages.size(); i++) {
+        ctx->initImage(cImages[i],
+          cImages[i]->getAvailableSubresources(),
+          VK_IMAGE_LAYOUT_UNDEFINED);
+      }
+    });
 
     return D3D_OK;
   }
@@ -1093,6 +1142,8 @@ namespace dxvk {
     if (m_hud != nullptr) {
       m_hud->addItem<hud::HudClientApiItem>("api", 1, GetApiName());
       m_hud->addItem<hud::HudSamplerCount>("samplers", -1, m_parent);
+      m_hud->addItem<hud::HudFixedFunctionShaders>("ffshaders", -1, m_parent);
+      m_hud->addItem<hud::HudSWVPState>("swvp", -1, m_parent);
 
 #ifdef D3D9_ALLOW_UNMAPPING
       m_hud->addItem<hud::HudTextureMemory>("memory", -1, m_parent);

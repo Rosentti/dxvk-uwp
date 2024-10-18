@@ -429,9 +429,34 @@ namespace dxvk {
 
       case D3D9Format::RAWZ: return {}; // Unsupported
 
+      case D3D9Format::R16:  return {}; // Unsupported
+
+      case D3D9Format::AL16: return {}; // Unsupported
+
       default:
         Logger::warn(str::format("ConvertFormat: Unknown format encountered: ", Format));
         return {}; // Unsupported
+    }
+  }
+
+  // Block size of formats that require some form of alignment
+  D3D9_FORMAT_BLOCK_SIZE GetFormatBlockSize(D3D9Format Format) {
+    switch (Format) {
+      case D3D9Format::DXT1:
+      case D3D9Format::DXT2:
+      case D3D9Format::DXT3:
+      case D3D9Format::DXT4:
+      case D3D9Format::DXT5:
+      case D3D9Format::ATI1:
+      case D3D9Format::ATI2:
+        return { 4, 4, 1 };
+
+      case D3D9Format::YUY2:
+      case D3D9Format::UYVY:
+        return { 2, 1, 1 };
+
+      default:
+        return {}; // Irrelevant or unknown block size
     }
   }
 
@@ -505,9 +530,6 @@ namespace dxvk {
     static const DxvkFormatInfo a8r3g3b2    = { 2, VK_IMAGE_ASPECT_COLOR_BIT };
     static const DxvkFormatInfo a8p8        = { 2, VK_IMAGE_ASPECT_COLOR_BIT };
     static const DxvkFormatInfo p8          = { 1, VK_IMAGE_ASPECT_COLOR_BIT };
-    static const DxvkFormatInfo l6v5u5      = { 2, VK_IMAGE_ASPECT_COLOR_BIT };
-    static const DxvkFormatInfo x8l8v8u8    = { 4, VK_IMAGE_ASPECT_COLOR_BIT };
-    static const DxvkFormatInfo a2w10v10u10 = { 4, VK_IMAGE_ASPECT_COLOR_BIT };
     static const DxvkFormatInfo cxv8u8      = { 2, VK_IMAGE_ASPECT_COLOR_BIT };
     static const DxvkFormatInfo unknown     = {};
 
@@ -526,15 +548,6 @@ namespace dxvk {
 
       case D3D9Format::P8:
         return &p8;
-
-      case D3D9Format::L6V5U5:
-        return &l6v5u5;
-
-      case D3D9Format::X8L8V8U8:
-        return &x8l8v8u8;
-
-      case D3D9Format::A2W10V10U10:
-        return &a2w10v10u10;
 
       // MULTI2_ARGB8 -> Don't have a clue what this is.
 

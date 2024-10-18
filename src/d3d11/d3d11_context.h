@@ -72,7 +72,9 @@ namespace dxvk {
     template<typename T> friend class D3D11DeviceContextExt;
     template<typename T> friend class D3D11UserDefinedAnnotation;
 
-    constexpr static VkDeviceSize StagingBufferSize = 4ull << 20;
+    // Use a local staging buffer to handle tiny uploads, most
+    // of the time we're fine with hitting the global allocator
+    constexpr static VkDeviceSize StagingBufferSize = 256ull << 10;
   public:
     
     D3D11CommonContext(
@@ -769,15 +771,14 @@ namespace dxvk {
     UINT                        m_flags;
 
     DxvkStagingBuffer           m_staging;
-    Rc<DxvkDataBuffer>          m_updateBuffer;
 
     DxvkCsChunkFlags            m_csFlags;
     DxvkCsChunkRef              m_csChunk;
     D3D11CmdData*               m_cmdData;
 
+    DxvkLocalAllocationCache    m_allocationCache;
+
     DxvkCsChunkRef AllocCsChunk();
-    
-    DxvkDataSlice AllocUpdateBufferSlice(size_t Size);
     
     DxvkBufferSlice AllocStagingBuffer(
             VkDeviceSize                      Size);

@@ -1,6 +1,12 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <type_traits>
+#include <utility>
+
+#include "util_bit.h"
+#include "util_likely.h"
 
 namespace dxvk {
 
@@ -33,12 +39,36 @@ namespace dxvk {
     };
 
     small_vector(small_vector&& other) {
-      if (other.m_capacity == N) {
+      if (other.m_size <= N) {
         for (size_t i = 0; i < other.m_size; i++) {
-          u.m_data[i] = std::move(other.u.m_data[i]);
+          new (&u.m_data[i]) T(std::move(*other.ptr(i)));
         }
       } else {
         u.m_ptr = other.u.m_ptr;
+        m_capacity = other.m_capacity;
+        other.u.m_ptr = nullptr;
+        other.m_capacity = N;
+      }
+      m_size = other.m_size;
+      other.m_size = 0;
+    }
+
+    small_vector& operator = (small_vector&& other) {
+      for (size_t i = 0; i < m_size; i++)
+        ptr(i)->~T();
+
+      if (m_capacity > N)
+        delete[] u.m_ptr;
+
+      if (other.m_size <= N) {
+        m_capacity = N;
+        for (size_t i = 0; i < other.m_size; i++) {
+          new (&u.m_data[i]) T(std::move(*other.ptr(i)));
+        }
+      } else {
+        u.m_ptr = other.u.m_ptr;
+        m_capacity = other.m_capacity;
+        other.u.m_ptr = nullptr;
         other.m_capacity = N;
       }
       m_size = other.m_size;
@@ -58,10 +88,10 @@ namespace dxvk {
     }
 
     void reserve(size_t n) {
-      n = pick_capacity(n);
-
-      if (n <= m_capacity)
+      if (likely(n <= m_capacity))
         return;
+
+      n = pick_capacity(n);
 
       storage* data = new storage[n];
 
@@ -152,12 +182,8 @@ namespace dxvk {
     } u;
 
     size_t pick_capacity(size_t n) {
-      size_t capacity = m_capacity;
-
-      while (capacity < n)
-        capacity *= 2;
-
-      return capacity;
+      // Pick next largest power of two for the new capacity
+      return size_t(1u) << ((sizeof(n) * 8u) - bit::lzcnt(n - 1));
     }
 
     T* ptr(size_t idx) {

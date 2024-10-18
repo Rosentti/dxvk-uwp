@@ -22,7 +22,6 @@
 #include "../dxso/dxso_options.h"
 #include "../dxso/dxso_modinfo.h"
 
-#include "d3d9_sampler.h"
 #include "d3d9_fixed_function.h"
 #include "d3d9_swvp_emu.h"
 
@@ -109,13 +108,6 @@ namespace dxvk {
     DxvkBufferSlice slice = {};
     void*           mapPtr = nullptr;
   };
-
-  struct D3D9StagingBufferMarkerPayload {
-    uint64_t        sequenceNumber;
-    VkDeviceSize    allocated;
-  };
-
-  using D3D9StagingBufferMarker = DxvkMarker<D3D9StagingBufferMarkerPayload>;
 
   class D3D9DeviceEx final : public ComObjectClamp<IDirect3DDevice9Ex> {
     constexpr static uint32_t DefaultFrameLatency = 3;
@@ -698,9 +690,9 @@ namespace dxvk {
       D3D9Format            Format) const;
 
     bool WaitForResource(
-      const Rc<DxvkResource>&                 Resource,
-            uint64_t                          SequenceNumber,
-            DWORD                             MapFlags);
+      const DxvkPagedResource&      Resource,
+            uint64_t                SequenceNumber,
+            DWORD                   MapFlags);
 
     /**
      * \brief Locks a subresource of an image
@@ -774,7 +766,7 @@ namespace dxvk {
      * @param FirstIndex The first index
      * @param NumIndices The number of indices that will be drawn. If this is 0, the index buffer binding will not be modified.
      */
-    void UploadDynamicSysmemBuffers(
+    void UploadPerDrawData(
             UINT&                   FirstVertexIndex,
             UINT                    NumVertices,
             UINT&                   FirstIndex,
@@ -782,7 +774,7 @@ namespace dxvk {
             INT&                    BaseVertexIndex,
             bool*                   pDynamicVBOs,
             bool*                   pDynamicIBO);
-    
+
 
     void SetupFPU();
 
@@ -797,12 +789,10 @@ namespace dxvk {
 
     void EndFrame();
 
-    void UpdateBoundRTs(uint32_t index);
-
     void UpdateActiveRTs(uint32_t index);
 
     template <uint32_t Index>
-    void UpdateAnyColorWrites(bool has);
+    void UpdateAnyColorWrites();
 
     void UpdateActiveTextures(uint32_t index, DWORD combinedUsage);
 
@@ -918,6 +908,8 @@ namespace dxvk {
 
     void PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBOs);
 
+    void EnsureSamplerLimit();
+
     template <DxsoProgramType ShaderStage>
     void BindShader(
       const D3D9CommonShader*                 pShaderModule);
@@ -979,10 +971,6 @@ namespace dxvk {
 
     HRESULT InitialReset(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
 
-    UINT GetSamplerCount() const {
-      return m_samplerCount.load();
-    }
-
     D3D9MemoryAllocator* GetAllocator() {
       return &m_memoryAllocator;
     }
@@ -1022,12 +1010,45 @@ namespace dxvk {
       return m_behaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING;
     }
 
-  private:
+    bool CanSWVP() const {
+      return m_behaviorFlags & (D3DCREATE_MIXED_VERTEXPROCESSING | D3DCREATE_SOFTWARE_VERTEXPROCESSING);
+    }
+
+    bool IsSWVP() const {
+      return m_isSWVP;
+    }
+
+    UINT GetFixedFunctionVSCount() const {
+      return m_ffModules.GetVSCount();
+    }
+
+    UINT GetFixedFunctionFSCount() const {
+      return m_ffModules.GetFSCount();
+    }
+
+    UINT GetSWVPShaderCount() const {
+      return m_swvpEmulator.GetShaderCount();
+    }
+
+    void InjectCsChunk(
+            DxvkCsChunkRef&&            Chunk,
+            bool                        Synchronize);
+
+    template<typename Fn>
+    void InjectCs(
+            Fn&&                        Command) {
+      auto chunk = AllocCsChunk();
+      chunk->push(std::move(Command));
+
+      InjectCsChunk(std::move(chunk), false);
+    }
 
     DxvkCsChunkRef AllocCsChunk() {
       DxvkCsChunk* chunk = m_csChunkPool.allocChunk(DxvkCsChunkFlag::SingleUse);
       return DxvkCsChunkRef(chunk, &m_csChunkPool);
     }
+
+  private:
 
     template<bool AllowFlush = true, typename Cmd>
     void EmitCs(Cmd&& command) {
@@ -1051,10 +1072,6 @@ namespace dxvk {
       }
     }
 
-    bool CanSWVP() const {
-      return m_behaviorFlags & (D3DCREATE_MIXED_VERTEXPROCESSING | D3DCREATE_SOFTWARE_VERTEXPROCESSING);
-    }
-
     // Device Reset detection for D3D9SwapChainEx::Present
     bool IsDeviceReset() {
       return std::exchange(m_deviceHasBeenReset, false);
@@ -1068,8 +1085,6 @@ namespace dxvk {
     D3D9BufferSlice AllocUPBuffer(VkDeviceSize size);
 
     D3D9BufferSlice AllocStagingBuffer(VkDeviceSize size);
-
-    void EmitStagingBufferMarker();
 
     void WaitStagingBuffer();
 
@@ -1273,6 +1288,31 @@ namespace dxvk {
       m_mostRecentlyUsedSwapchain = m_implicitSwapchain.ptr();
     }
 
+    bool IsTextureBoundAsAttachment(const D3D9CommonTexture* pTexture) const {
+      if (unlikely(pTexture->IsRenderTarget())) {
+        for (uint32_t i = 0u; i < m_state.renderTargets.size(); i++) {
+          if (m_state.renderTargets[i] == nullptr)
+            continue;
+
+          auto texInfo = m_state.renderTargets[i]->GetCommonTexture();
+          if (unlikely(texInfo == pTexture)) {
+            return true;
+          }
+        }
+      } else if (unlikely(pTexture->IsDepthStencil() && m_state.depthStencil != nullptr)) {
+        auto texInfo = m_state.depthStencil->GetCommonTexture();
+        if (unlikely(texInfo == pTexture)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    inline bool HasRenderTargetBound(uint32_t Index) const {
+      return m_state.renderTargets[Index] != nullptr
+        && !m_state.renderTargets[Index]->IsNull();
+    }
+
     Com<D3D9InterfaceEx>            m_parent;
     D3DDEVTYPE                      m_deviceType;
     HWND                            m_window;
@@ -1313,10 +1353,8 @@ namespace dxvk {
     void*                           m_upBufferMapPtr  = nullptr;
 
     DxvkStagingBuffer               m_stagingBuffer;
-    VkDeviceSize                    m_stagingBufferAllocated      = 0ull;
-    VkDeviceSize                    m_stagingBufferLastAllocated  = 0ull;
-    VkDeviceSize                    m_stagingBufferLastSignaled   = 0ull;
-    std::queue<Rc<D3D9StagingBufferMarker>> m_stagingBufferMarkers;
+    Rc<sync::Fence>                 m_stagingBufferFence;
+    VkDeviceSize                    m_stagingMemorySignaled = 0ull;
 
     D3D9Cursor                      m_cursor;
 
@@ -1326,12 +1364,6 @@ namespace dxvk {
 
     const D3D9Options               m_d3d9Options;
     DxsoOptions                     m_dxsoOptions;
-
-    std::unordered_map<
-      D3D9SamplerKey,
-      Rc<DxvkSampler>,
-      D3D9SamplerKeyHash,
-      D3D9SamplerKeyEq>             m_samplers;
 
     std::unordered_map<
       DWORD,
@@ -1355,8 +1387,6 @@ namespace dxvk {
     uint32_t                        m_dirtySamplerStates = 0;
     uint32_t                        m_dirtyTextures      = 0;
 
-    uint32_t                        m_boundRTs        : 4;
-    uint32_t                        m_anyColorWrites  : 4;
     uint32_t                        m_activeRTsWhichAreTextures : 4;
     uint32_t                        m_alphaSwizzleRTs : 4;
     uint32_t                        m_lastHazardsRT   : 4;
@@ -1368,6 +1398,10 @@ namespace dxvk {
     uint32_t                        m_activeTextures         = 0;
     uint32_t                        m_activeTexturesToUpload = 0;
     uint32_t                        m_activeTexturesToGen    = 0;
+
+    uint32_t                        m_activeVertexBuffers                = 0;
+    uint32_t                        m_activeVertexBuffersToUpload        = 0;
+    uint32_t                        m_activeVertexBuffersToUploadPerDraw = 0;
 
     // m_fetch4Enabled is whether fetch4 is currently enabled
     // from the application.
@@ -1431,7 +1465,6 @@ namespace dxvk {
     GpuFlushTracker                 m_flushTracker;
 
     std::atomic<int64_t>            m_availableMemory = { 0 };
-    std::atomic<int32_t>            m_samplerCount    = { 0 };
 
     D3D9DeviceLostState             m_deviceLostState          = D3D9DeviceLostState::Ok;
     HWND                            m_fullscreenWindow         = NULL;
@@ -1450,6 +1483,19 @@ namespace dxvk {
     D3D9VkInteropDevice             m_d3d9Interop;
     D3D9On12                        m_d3d9On12;
     DxvkD3D8Bridge                  m_d3d8Bridge;
+
+    // Sampler statistics
+    constexpr static uint32_t       SamplerCountBits = 12u;
+    constexpr static uint64_t       SamplerCountMask = (1u << SamplerCountBits) - 1u;
+
+    uint64_t                        m_samplerBindCount = 0u;
+
+    uint64_t                        m_lastSamplerLiveCount = 0u;
+    uint64_t                        m_lastSamplerBindCount = 0u;
+
+    // Written by CS thread
+    alignas(CACHE_LINE_SIZE)
+    std::atomic<uint64_t>           m_lastSamplerStats = { 0u };
   };
 
 }

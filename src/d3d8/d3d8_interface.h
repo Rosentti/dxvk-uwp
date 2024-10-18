@@ -63,12 +63,15 @@ namespace dxvk {
         D3DFORMAT   AdapterFormat,
         D3DFORMAT   BackBufferFormat,
         BOOL        bWindowed) {
+      // Ignore the bWindowed parameter when querying D3D9. D3D8 does
+      // identical validations between windowed and fullscreen modes, adhering
+      // to the stricter fullscreen adapter and back buffer format validations.
       return m_d3d9->CheckDeviceType(
           Adapter,
           (d3d9::D3DDEVTYPE)DevType,
           (d3d9::D3DFORMAT)AdapterFormat,
           (d3d9::D3DFORMAT)BackBufferFormat,
-          bWindowed
+          FALSE
       );
     }
 
@@ -128,9 +131,15 @@ namespace dxvk {
         UINT Adapter,
         D3DDEVTYPE DeviceType,
         D3DCAPS8* pCaps) {
+      if (unlikely(pCaps == nullptr))
+        return D3DERR_INVALIDCALL;
+
       d3d9::D3DCAPS9 caps9;
       HRESULT res = m_d3d9->GetDeviceCaps(Adapter, (d3d9::D3DDEVTYPE)DeviceType, &caps9);
-      dxvk::ConvertCaps8(caps9, pCaps);
+
+      if (likely(SUCCEEDED(res)))
+        dxvk::ConvertCaps8(caps9, pCaps);
+
       return res;
     }
 
@@ -155,7 +164,7 @@ namespace dxvk {
     std::vector<UINT>                               m_adapterModeCounts;
     std::vector<std::vector<d3d9::D3DDISPLAYMODE>>  m_adapterModes;
 
-    d3d9::IDirect3D9*                               m_d3d9;
+    Com<d3d9::IDirect3D9>                           m_d3d9;
     Com<IDxvkD3D8InterfaceBridge>                   m_bridge;
     D3D8Options                                     m_d3d8Options;
   };

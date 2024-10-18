@@ -65,6 +65,9 @@ namespace dxvk {
     HRESULT STDMETHODCALLTYPE GetSubresource(UINT Index, SubresourceType8** ppSubresource) {
       InitReturnPtr(ppSubresource);
 
+      if (unlikely(ppSubresource == nullptr))
+        return D3DERR_INVALIDCALL;
+
       if (unlikely(Index >= m_subresources.size()))
         return D3DERR_INVALIDCALL;
       
@@ -90,7 +93,7 @@ namespace dxvk {
       HRESULT res = D3DERR_INVALIDCALL;
       if constexpr (std::is_same_v<D3D8, IDirect3DTexture8>) {
         res = this->GetD3D9()->GetSurfaceLevel(Index, &ptr); 
-      } else if constexpr (std::is_same_v<D3D8, IDirect3DVolume8>) {
+      } else if constexpr (std::is_same_v<D3D8, IDirect3DVolumeTexture8>) {
         res = this->GetD3D9()->GetVolumeLevel(Index, &ptr);
       } else if constexpr (std::is_same_v<D3D8, IDirect3DCubeTexture8>) {
         res = this->GetD3D9()->GetCubeMapSurface(d3d9::D3DCUBEMAP_FACES(Index % CUBE_FACES), Index / CUBE_FACES, &ptr);
@@ -118,9 +121,15 @@ namespace dxvk {
     D3DRESOURCETYPE STDMETHODCALLTYPE GetType() final { return D3DRTYPE_TEXTURE; }
 
     HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT Level, D3DSURFACE_DESC* pDesc) {
+      if (unlikely(pDesc == nullptr))
+        return D3DERR_INVALIDCALL;
+
       d3d9::D3DSURFACE_DESC surf;
       HRESULT res = GetD3D9()->GetLevelDesc(Level, &surf);
-      ConvertSurfaceDesc8(&surf, pDesc);
+
+      if (likely(SUCCEEDED(res)))
+        ConvertSurfaceDesc8(&surf, pDesc);
+
       return res;
     }
 
@@ -155,9 +164,15 @@ namespace dxvk {
     D3DRESOURCETYPE STDMETHODCALLTYPE GetType() final { return D3DRTYPE_VOLUMETEXTURE; }
 
     HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT Level, D3DVOLUME_DESC *pDesc) {
+      if (unlikely(pDesc == nullptr))
+        return D3DERR_INVALIDCALL;
+
       d3d9::D3DVOLUME_DESC vol;
       HRESULT res = GetD3D9()->GetLevelDesc(Level, &vol);
-      ConvertVolumeDesc8(&vol, pDesc);
+
+      if (likely(SUCCEEDED(res)))
+        ConvertVolumeDesc8(&vol, pDesc);
+
       return res;
     }
 
@@ -198,9 +213,15 @@ namespace dxvk {
     D3DRESOURCETYPE STDMETHODCALLTYPE GetType() final { return D3DRTYPE_CUBETEXTURE; }
 
     HRESULT STDMETHODCALLTYPE GetLevelDesc(UINT Level, D3DSURFACE_DESC* pDesc) {
+      if (unlikely(pDesc == nullptr))
+        return D3DERR_INVALIDCALL;
+
       d3d9::D3DSURFACE_DESC surf;
       HRESULT res = GetD3D9()->GetLevelDesc(Level, &surf);
-      ConvertSurfaceDesc8(&surf, pDesc);
+
+      if (likely(SUCCEEDED(res)))
+        ConvertSurfaceDesc8(&surf, pDesc);
+
       return res;
     }
 

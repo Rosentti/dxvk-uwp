@@ -7,6 +7,9 @@
 namespace dxvk::wsi {
 
   class Win32WsiDriver : public WsiDriver {
+  private:
+    uint64_t m_lastForegroundTimestamp = 0;
+
   public:
     // Platform
     virtual std::vector<const char *> getInstanceExtensions();
@@ -76,6 +79,10 @@ namespace dxvk::wsi {
     virtual HMONITOR getWindowMonitor(HWND hWindow);
 
     virtual bool isWindow(HWND hWindow);
+
+    virtual bool isMinimized(HWND hWindow);
+
+    virtual bool isOccluded(HWND hWindow);
 
     virtual void updateFullscreenWindow(
             HMONITOR hMonitor,

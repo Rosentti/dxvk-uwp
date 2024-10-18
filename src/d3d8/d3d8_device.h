@@ -1,6 +1,7 @@
 #pragma once
 
 #include "d3d8_include.h"
+#include "d3d8_multithread.h"
 #include "d3d8_texture.h"
 #include "d3d8_buffer.h"
 #include "d3d8_swapchain.h"
@@ -357,8 +358,16 @@ namespace dxvk {
 
   public: // Internal Methods //
 
+    const D3D8Options* GetOptions() const {
+      return &m_d3d8Options;
+    }
+
     inline bool ShouldRecord() { return m_recorder != nullptr; }
     inline bool ShouldBatch()  { return m_batcher  != nullptr; }
+
+    D3D8DeviceLock LockDevice() {
+      return m_multithread.AcquireLock();
+    }
 
     /**
      * Marks any state change in the device, so we can signal
@@ -396,9 +405,11 @@ namespace dxvk {
         m_backBuffers[i] = new D3D8Surface(this, std::move(pSurface9));
       }
 
-      Com<d3d9::IDirect3DSurface9> pStencil9 = nullptr;
-      GetD3D9()->GetDepthStencilSurface(&pStencil9);
-      m_autoDepthStencil = new D3D8Surface(this, std::move(pStencil9));
+      Com<d3d9::IDirect3DSurface9> pStencil9;
+      // This call will fail if the D3D9 device is created without
+      // the EnableAutoDepthStencil presentation parameter set to TRUE.
+      HRESULT res = GetD3D9()->GetDepthStencilSurface(&pStencil9);
+      m_autoDepthStencil = FAILED(res) ? nullptr : new D3D8Surface(this, std::move(pStencil9));
 
       m_renderTarget = m_backBuffers[0];
       m_depthStencil = m_autoDepthStencil;
@@ -441,15 +452,17 @@ namespace dxvk {
     Com<D3D8Surface, false>     m_renderTarget;
     Com<D3D8Surface, false>     m_depthStencil;
 
-    std::vector<D3D8VertexShaderInfo>           m_vertexShaders;
-    std::vector<d3d9::IDirect3DPixelShader9*>   m_pixelShaders;
-    DWORD                                       m_currentVertexShader  = 0; // can be FVF or vs index (marked by D3DFVF_RESERVED0)
-    DWORD                                       m_currentPixelShader   = 0;
+    std::vector<D3D8VertexShaderInfo>               m_vertexShaders;
+    std::vector<Com<d3d9::IDirect3DPixelShader9>>   m_pixelShaders;
+    DWORD                                           m_currentVertexShader  = 0; // can be FVF or vs index (marked by D3DFVF_RESERVED0)
+    DWORD                                           m_currentPixelShader   = 0;
 
     D3DDEVTYPE            m_deviceType;
     HWND                  m_window;
 
     DWORD                 m_behaviorFlags;
+
+    D3D8Multithread       m_multithread;
 
   };
 

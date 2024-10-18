@@ -14,11 +14,11 @@ namespace dxvk {
     m_instance          (instance),
     m_adapter           (adapter),
     m_vkd               (vkd),
+    m_queues            (queues),
     m_features          (features),
     m_properties        (adapter->devicePropertiesExt()),
     m_perfHints         (getPerfHints()),
     m_objects           (this),
-    m_queues            (queues),
     m_submissionQueue   (this, queueCallback) {
 
   }
@@ -138,16 +138,22 @@ namespace dxvk {
   }
 
 
-  Rc<DxvkGpuEvent> DxvkDevice::createGpuEvent() {
-    return new DxvkGpuEvent(m_vkd);
+  Rc<DxvkEvent> DxvkDevice::createGpuEvent() {
+    return new DxvkEvent(this);
   }
 
 
-  Rc<DxvkGpuQuery> DxvkDevice::createGpuQuery(
+  Rc<DxvkQuery> DxvkDevice::createGpuQuery(
           VkQueryType           type,
           VkQueryControlFlags   flags,
           uint32_t              index) {
-    return new DxvkGpuQuery(m_vkd, type, flags, index);
+    return new DxvkQuery(this, type, flags, index);
+  }
+
+
+  Rc<DxvkGpuQuery> DxvkDevice::createRawQuery(
+          VkQueryType           type) {
+    return m_objects.queryPool().allocQuery(type);
   }
 
 
@@ -164,13 +170,6 @@ namespace dxvk {
   }
   
   
-  Rc<DxvkBufferView> DxvkDevice::createBufferView(
-    const Rc<DxvkBuffer>&           buffer,
-    const DxvkBufferViewCreateInfo& createInfo) {
-    return new DxvkBufferView(m_vkd, buffer, createInfo);
-  }
-  
-  
   Rc<DxvkImage> DxvkDevice::createImage(
     const DxvkImageCreateInfo&  createInfo,
           VkMemoryPropertyFlags memoryType) {
@@ -178,19 +177,19 @@ namespace dxvk {
   }
   
   
-  Rc<DxvkImageView> DxvkDevice::createImageView(
-    const Rc<DxvkImage>&            image,
-    const DxvkImageViewCreateInfo&  createInfo) {
-    return new DxvkImageView(m_vkd, image, createInfo);
-  }
-  
-  
   Rc<DxvkSampler> DxvkDevice::createSampler(
-    const DxvkSamplerCreateInfo&  createInfo) {
-    return new DxvkSampler(this, createInfo);
+    const DxvkSamplerKey&         createInfo) {
+    return m_objects.samplerPool().createSampler(createInfo);
   }
-  
-  
+
+
+  DxvkLocalAllocationCache DxvkDevice::createAllocationCache(
+          VkBufferUsageFlags    bufferUsage,
+          VkMemoryPropertyFlags propertyFlags) {
+    return m_objects.memoryManager().createAllocationCache(bufferUsage, propertyFlags);
+  }
+
+
   Rc<DxvkSparsePageAllocator> DxvkDevice::createSparsePageAllocator() {
     return new DxvkSparsePageAllocator(m_objects.memoryManager());
   }
@@ -218,7 +217,8 @@ namespace dxvk {
     const DxvkBufferCreateInfo& createInfo,
     const DxvkBufferImportInfo& importInfo,
           VkMemoryPropertyFlags memoryType) {
-    return new DxvkBuffer(this, createInfo, importInfo, memoryType);
+    return new DxvkBuffer(this, createInfo,
+      importInfo, m_objects.memoryManager(), memoryType);
   }
 
 
@@ -226,12 +226,19 @@ namespace dxvk {
     const DxvkImageCreateInfo&  createInfo,
           VkImage               image,
           VkMemoryPropertyFlags memoryType) {
-    return new DxvkImage(this, createInfo, image, memoryType);
+    return new DxvkImage(this, createInfo, image,
+      m_objects.memoryManager(), memoryType);
   }
 
 
   DxvkMemoryStats DxvkDevice::getMemoryStats(uint32_t heap) {
     return m_objects.memoryManager().getMemoryStats(heap);
+  }
+
+
+  DxvkSharedAllocationCacheStats DxvkDevice::getMemoryAllocationStats(DxvkMemoryAllocationStats& stats) {
+    m_objects.memoryManager().getAllocationStats(stats);
+    return m_objects.memoryManager().getAllocationCacheStats();
   }
 
 
@@ -293,12 +300,12 @@ namespace dxvk {
   }
 
 
-  void DxvkDevice::waitForResource(const Rc<DxvkResource>& resource, DxvkAccess access) {
-    if (resource->isInUse(access)) {
+  void DxvkDevice::waitForResource(const DxvkPagedResource& resource, DxvkAccess access) {
+    if (resource.isInUse(access)) {
       auto t0 = dxvk::high_resolution_clock::now();
 
-      m_submissionQueue.synchronizeUntil([resource, access] {
-        return !resource->isInUse(access);
+      m_submissionQueue.synchronizeUntil([&resource, access] {
+        return !resource.isInUse(access);
       });
 
       auto t1 = dxvk::high_resolution_clock::now();
