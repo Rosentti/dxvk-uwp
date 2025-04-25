@@ -40,6 +40,11 @@ namespace dxvk::vk {
     = VK_ACCESS_HOST_READ_BIT
     | VK_ACCESS_HOST_WRITE_BIT;
 
+  constexpr static VkAccessFlags AccessGfxSideEffectMask
+    = VK_ACCESS_SHADER_WRITE_BIT
+    | VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT
+    | VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_WRITE_BIT_EXT;
+
   constexpr static VkPipelineStageFlags StageDeviceMask
     = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
     | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT
@@ -209,6 +214,63 @@ namespace dxvk::vk {
 
       ppNext = &pStruct->pNext;
     }
+  }
+
+
+  inline uint64_t getObjectHandle(uint64_t handle) {
+    return handle;
+  }
+
+
+  template<typename T>
+  uint64_t getObjectHandle(T* object) {
+    return reinterpret_cast<uintptr_t>(object);
+  }
+
+
+  inline bool isValidDebugName(const char* name) {
+    return name && name[0];
+  }
+
+
+  /**
+   * \brief Queries sRGB and non-sSRGB format pair
+   *
+   * \param [in] format Format to look up
+   * \returns Pair of the corresponding non-SRGB and sRGB formats.
+   *    If the format in quesion has no sRGB equivalent, this
+   *    function returns \c VK_FORMAT_UNDEFINED.
+   */
+  inline std::pair<VkFormat, VkFormat> getSrgbFormatPair(VkFormat format) {
+    static const std::array<std::pair<VkFormat, VkFormat>, 3> srgbFormatMap = {{
+      { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB },
+      { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB },
+      { VK_FORMAT_A8B8G8R8_UNORM_PACK32, VK_FORMAT_A8B8G8R8_SRGB_PACK32 },
+    }};
+
+    for (const auto& f : srgbFormatMap) {
+      if (f.first == format || f.second == format)
+        return f;
+    }
+
+    return std::make_pair(VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED);
+  }
+
+
+  /**
+   * \brief Makes debug label
+   *
+   * \param [in] color Color, as BGR with implied opaque alpha
+   * \param [in] text Label text
+   */
+  inline VkDebugUtilsLabelEXT makeLabel(uint32_t color, const char* text) {
+    VkDebugUtilsLabelEXT label = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT };
+    label.color[0] = ((color >> 16u) & 0xffu) / 255.0f;
+    label.color[1] = ((color >> 8u)  & 0xffu) / 255.0f;
+    label.color[2] = ((color >> 0u)  & 0xffu) / 255.0f;
+    label.color[3] = color ? 1.0f : 0.0f;
+    label.pLabelName = text;
+    return label;
   }
 
 }

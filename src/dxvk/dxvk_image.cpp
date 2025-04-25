@@ -14,7 +14,17 @@ namespace dxvk {
     m_properties    (memFlags),
     m_shaderStages  (util::shaderStages(createInfo.stages)),
     m_info          (createInfo) {
+    m_allocator->registerResource(this);
+
     copyFormatList(createInfo.viewFormatCount, createInfo.viewFormats);
+
+    // Assign debug name to image
+    if (device->debugFlags().test(DxvkDebugFlag::Capture)) {
+      m_debugName = createDebugName(createInfo.debugName);
+      m_info.debugName = m_debugName.c_str();
+    } else {
+      m_info.debugName = nullptr;
+    }
 
     // Always enable depth-stencil attachment usage for depth-stencil
     // formats since some internal operations rely on it. Read-only
@@ -43,35 +53,29 @@ namespace dxvk {
     m_allocator     (&memAlloc),
     m_properties    (memFlags),
     m_shaderStages  (util::shaderStages(createInfo.stages)),
-    m_info          (createInfo) {
+    m_info          (createInfo),
+    m_stableAddress (true) {
+    m_allocator->registerResource(this);
+
     copyFormatList(createInfo.viewFormatCount, createInfo.viewFormats);
 
     // Create backing storage for existing image resource
+    DxvkAllocationInfo allocationInfo = { };
+    allocationInfo.resourceCookie = cookie();
+
     VkImageCreateInfo imageInfo = getImageCreateInfo(DxvkImageUsageInfo());
-    assignStorage(m_allocator->importImageResource(imageInfo, imageHandle));
+    assignStorage(m_allocator->importImageResource(imageInfo, allocationInfo, imageHandle));
   }
 
 
   DxvkImage::~DxvkImage() {
-
+    m_allocator->unregisterResource(this);
   }
 
 
   bool DxvkImage::canRelocate() const {
     return !m_imageInfo.mapPtr && !m_shared && !m_stableAddress
-        && !m_storage->flags().test(DxvkAllocationFlag::Imported)
         && !(m_info.flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
-  }
-
-
-  VkSubresourceLayout DxvkImage::querySubresourceLayout(
-    const VkImageSubresource& subresource) const {
-    VkSubresourceLayout result = { };
-
-    m_vkd->vkGetImageSubresourceLayout(m_vkd->device(),
-      m_imageInfo.image, &subresource, &result);
-
-    return result;
   }
 
 
@@ -101,6 +105,38 @@ namespace dxvk {
   }
 
 
+  Rc<DxvkResourceAllocation> DxvkImage::relocateStorage(
+          DxvkAllocationModes         mode) {
+    if (!canRelocate())
+      return nullptr;
+
+    return allocateStorageWithUsage(DxvkImageUsageInfo(), mode);
+  }
+
+
+  uint64_t DxvkImage::getTrackingAddress(uint32_t mip, uint32_t layer, VkOffset3D coord) const {
+    // For 2D and 3D images, use morton codes to linearize the address ranges
+    // of pixel blocks. This helps reduce false positives in common use cases
+    // where the application copies aligned power-of-two blocks around.
+    uint64_t base = getTrackingAddress(mip, layer);
+
+    if (likely(m_info.type == VK_IMAGE_TYPE_2D))
+      return base + bit::interleave(coord.x, coord.y);
+
+    // For 1D we can simply use the pixel coordinate as-is
+    if (m_info.type == VK_IMAGE_TYPE_1D)
+      return base + coord.x;
+
+    // 3D is uncommon, but there are different use cases. Assume that if the
+    // format is block-compressed, the app will access one layer at a time.
+    if (formatInfo()->flags.test(DxvkFormatFlag::BlockCompressed))
+      return base + bit::interleave(coord.x, coord.y) + (uint64_t(coord.z) << 32u);
+
+    // Otherwise, it may want to copy actual 3D blocks around.
+    return base + bit::interleave(coord.x, coord.y, coord.z);
+  }
+
+
   Rc<DxvkImageView> DxvkImage::createView(
     const DxvkImageViewKey& info) {
     std::unique_lock lock(m_viewMutex);
@@ -113,11 +149,13 @@ namespace dxvk {
 
 
   Rc<DxvkResourceAllocation> DxvkImage::allocateStorage() {
-    return allocateStorageWithUsage(DxvkImageUsageInfo());
+    return allocateStorageWithUsage(DxvkImageUsageInfo(), 0u);
   }
 
 
-  Rc<DxvkResourceAllocation> DxvkImage::allocateStorageWithUsage(const DxvkImageUsageInfo& usageInfo) {
+  Rc<DxvkResourceAllocation> DxvkImage::allocateStorageWithUsage(
+    const DxvkImageUsageInfo&         usageInfo,
+          DxvkAllocationModes         mode) {
     const DxvkFormatInfo* formatInfo = lookupFormatInfo(m_info.format);
     small_vector<VkFormat, 4> localViewFormats;
 
@@ -173,8 +211,16 @@ namespace dxvk {
       sharedImportWin32.handle = m_info.sharing.handle;
     }
 
+    DxvkAllocationInfo allocationInfo = { };
+    allocationInfo.resourceCookie = cookie();
+    allocationInfo.properties = m_properties;
+    allocationInfo.mode = mode;
+
+    if (m_info.transient)
+      allocationInfo.mode.set(DxvkAllocationMode::NoDedicated);
+
     return m_allocator->createImageResource(imageInfo,
-      m_properties, sharedMemoryInfo);
+      allocationInfo, sharedMemoryInfo);
   }
 
 
@@ -191,20 +237,33 @@ namespace dxvk {
 
     // Self-assignment is possible here if we
     // just update the image properties
+    bool invalidateViews = false;
     m_storage = std::move(resource);
 
     if (m_storage != old) {
       m_imageInfo = m_storage->getImageInfo();
-      m_version += 1u;
+
+      if (unlikely(m_info.debugName))
+        updateDebugName();
+
+      invalidateViews = true;
     }
+
+    if ((m_info.access | usageInfo.access) != m_info.access)
+      invalidateViews = true;
 
     m_info.flags |= usageInfo.flags;
     m_info.usage |= usageInfo.usage;
     m_info.stages |= usageInfo.stages;
     m_info.access |= usageInfo.access;
 
-    if (usageInfo.layout != VK_IMAGE_LAYOUT_UNDEFINED)
+    if (usageInfo.layout != VK_IMAGE_LAYOUT_UNDEFINED) {
       m_info.layout = usageInfo.layout;
+      invalidateViews = true;
+    }
+
+    if (usageInfo.colorSpace != VK_COLOR_SPACE_MAX_ENUM_KHR)
+      m_info.colorSpace = usageInfo.colorSpace;
 
     for (uint32_t i = 0; i < usageInfo.viewFormatCount; i++) {
       if (!isViewCompatible(usageInfo.viewFormats[i]))
@@ -217,6 +276,10 @@ namespace dxvk {
     }
 
     m_stableAddress |= usageInfo.stableGpuAddress;
+
+    if (invalidateViews)
+      m_version += 1u;
+
     return old;
   }
 
@@ -242,7 +305,7 @@ namespace dxvk {
       uint16_t mipMask = ((1u << subresources.levelCount) - 1u) << subresources.baseMipLevel;
 
       for (uint32_t i = subresources.baseArrayLayer; i < subresources.baseArrayLayer + subresources.layerCount; i++) {
-        m_uninitializedSubresourceCount -= bit::popcnt(m_uninitializedMipsPerLayer[i] & mipMask);
+        m_uninitializedSubresourceCount -= bit::popcnt(uint16_t(m_uninitializedMipsPerLayer[i] & mipMask));
         m_uninitializedMipsPerLayer[i] &= ~mipMask;
       }
 
@@ -268,6 +331,34 @@ namespace dxvk {
     }
 
     return true;
+  }
+
+
+  void DxvkImage::setDebugName(const char* name) {
+    if (likely(!m_info.debugName))
+      return;
+
+    m_debugName = createDebugName(name);
+    m_info.debugName = m_debugName.c_str();
+
+    updateDebugName();
+  }
+
+
+  void DxvkImage::updateDebugName() {
+    if (m_storage->flags().test(DxvkAllocationFlag::OwnsImage)) {
+      VkDebugUtilsObjectNameInfoEXT nameInfo = { VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+      nameInfo.objectType = VK_OBJECT_TYPE_IMAGE;
+      nameInfo.objectHandle = vk::getObjectHandle(m_imageInfo.image);
+      nameInfo.pObjectName = m_info.debugName;
+
+      m_vkd->vkSetDebugUtilsObjectNameEXT(m_vkd->device(), &nameInfo);
+    }
+  }
+
+
+  std::string DxvkImage::createDebugName(const char* name) const {
+    return str::format(vk::isValidDebugName(name) ? name : "Image", " (", cookie(), ")");
   }
 
 
@@ -346,8 +437,9 @@ namespace dxvk {
   DxvkImageView::DxvkImageView(
           DxvkImage*                image,
     const DxvkImageViewKey&         key)
-  : m_image(image), m_key(key) {
-
+  : m_image   (image),
+    m_key     (key) {
+    updateProperties();
   }
 
 
@@ -432,6 +524,9 @@ namespace dxvk {
 
 
   void DxvkImageView::updateViews() {
+    // Latch updated image properties
+    updateProperties();
+
     // Update all views that are not currently null
     for (uint32_t i = 0; i < m_views.size(); i++) {
       if (m_views[i])
@@ -440,5 +535,12 @@ namespace dxvk {
 
     m_version = m_image->m_version;
   }
-  
+
+
+  void DxvkImageView::updateProperties() {
+    m_properties.layout = m_image->info().layout;
+    m_properties.samples = m_image->info().sampleCount;
+    m_properties.access = m_image->info().access;
+  }
+
 }

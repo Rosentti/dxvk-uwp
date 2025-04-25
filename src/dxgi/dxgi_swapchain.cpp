@@ -22,7 +22,8 @@ namespace dxvk {
     m_presentId (0u),
     m_presenter (pPresenter),
     m_monitor   (wsi::getWindowMonitor(m_window)),
-    m_is_d3d12(SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&Com<ID3D12CommandQueue>())))) {
+    m_is_d3d12(SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&Com<ID3D12CommandQueue>())))),
+    m_destructionNotifier(this) {
 
     if (FAILED(m_presenter->GetAdapter(__uuidof(IDXGIAdapter), reinterpret_cast<void**>(&m_adapter))))
       throw DxvkError("DXGI: Failed to get adapter for present device");
@@ -43,6 +44,14 @@ namespace dxvk {
 
     // Ensure that RGBA16 swap chains are scRGB if supported
     UpdateColorSpace(m_desc.Format, m_colorSpace);
+
+    // Somewhat hacky way to determine whether to forward the
+    // display refresh rate in windowed mode even with a sync
+    // interval of 1.
+    if (!m_is_d3d12) {
+      auto instance = pFactory->GetDXVKInstance();
+      m_hasLatencyControl = instance->options().latencySleep == Tristate::True;
+    }
   }
   
   
@@ -77,6 +86,11 @@ namespace dxvk {
      || riid == __uuidof(IDXGISwapChain3)
      || riid == __uuidof(IDXGISwapChain4)) {
       *ppvObject = ref(this);
+      return S_OK;
+    }
+
+    if (riid == __uuidof(ID3DDestructionNotifier)) {
+      *ppvObject = ref(&m_destructionNotifier);
       return S_OK;
     }
     
@@ -813,7 +827,7 @@ namespace dxvk {
     if (!selectedMode.RefreshRate.Denominator)
       selectedMode.RefreshRate.Denominator = 1;
 
-    if (!wsi::setWindowMode(outputDesc.Monitor, m_window, ConvertDisplayMode(selectedMode)))
+    if (!wsi::setWindowMode(outputDesc.Monitor, m_window, &m_windowState, ConvertDisplayMode(selectedMode)))
       return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
 
     DXGI_VK_MONITOR_DATA* monitorData = nullptr;
@@ -1000,10 +1014,12 @@ namespace dxvk {
     // Engage the frame limiter with large sync intervals even in windowed
     // mode since we want to avoid double-presenting to the swap chain.
     if (SyncInterval != m_frameRateSyncInterval && m_descFs.Windowed) {
+      bool engageLimiter = (SyncInterval > 1u) || (SyncInterval && m_hasLatencyControl);
+
       m_frameRateSyncInterval = SyncInterval;
       m_frameRateRefresh = 0.0f;
 
-      if (SyncInterval > 1 && wsi::isWindow(m_window)) {
+      if (engageLimiter && wsi::isWindow(m_window)) {
         wsi::WsiMode mode = { };
 
         if (wsi::getCurrentDisplayMode(wsi::getWindowMonitor(m_window), &mode)) {

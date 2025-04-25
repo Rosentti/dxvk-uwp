@@ -2494,13 +2494,13 @@ namespace dxvk {
   }
   
   
-  uint32_t SpirvModule::opFOrdNotEqual(
+  uint32_t SpirvModule::opFUnordNotEqual(
           uint32_t                resultType,
           uint32_t                vector1,
           uint32_t                vector2) {
     uint32_t resultId = this->allocateId();
     
-    m_code.putIns (spv::OpFOrdNotEqual, 5);
+    m_code.putIns (spv::OpFUnordNotEqual, 5);
     m_code.putWord(resultType);
     m_code.putWord(resultId);
     m_code.putWord(vector1);
@@ -3892,15 +3892,15 @@ namespace dxvk {
       
       if (op.flags & spv::ImageOperandsLodMask)
         m_code.putWord(op.sLod);
-      
-      if (op.flags & spv::ImageOperandsConstOffsetMask)
-        m_code.putWord(op.sConstOffset);
-      
+
       if (op.flags & spv::ImageOperandsGradMask) {
         m_code.putWord(op.sGradX);
         m_code.putWord(op.sGradY);
       }
-      
+
+      if (op.flags & spv::ImageOperandsConstOffsetMask)
+        m_code.putWord(op.sConstOffset);
+
       if (op.flags & spv::ImageOperandsOffsetMask)
         m_code.putWord(op.gOffset);
       

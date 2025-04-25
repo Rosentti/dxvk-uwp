@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <map>
 
 #include "dxvk_access.h"
@@ -434,7 +435,18 @@ namespace dxvk {
 
   public:
 
+    DxvkPagedResource()
+    : m_cookie(++s_cookie) { }
+
     virtual ~DxvkPagedResource();
+
+    /**
+     * \brief Queries resource cookie
+     * \returns Resource cookie
+     */
+    uint64_t cookie() const {
+      return m_cookie;
+    }
 
     /**
      * \brief Increments reference count
@@ -500,7 +512,105 @@ namespace dxvk {
     force_inline bool isInUse(DxvkAccess access) const {
       return m_useCount.load(std::memory_order_acquire) >= getIncrement(access);
     }
-    
+
+    /**
+     * \brief Tries to acquire reference
+     *
+     * If the reference count is zero at the time this is called,
+     * the method will fail, otherwise the reference count will
+     * be incremented by one. This is useful to safely obtain a
+     * pointer from a look-up table that does not own references.
+     * \returns \c true on success
+     */
+    Rc<DxvkPagedResource> tryAcquire() {
+      uint64_t increment = getIncrement(DxvkAccess::None);
+      uint64_t refCount = m_useCount.load(std::memory_order_acquire);
+
+      do {
+        if (!refCount)
+          return nullptr;
+      } while (!m_useCount.compare_exchange_strong( refCount,
+        refCount + increment, std::memory_order_relaxed));
+
+      return Rc<DxvkPagedResource>::unsafeCreate(this);
+    }
+
+    /**
+     * \brief Queries tracking ID
+     *
+     * Used to determine when a resource has last been used.
+     * \returns Tracking ID
+     */
+    uint64_t getTrackId() const {
+      return m_trackId >> 1u;
+    }
+
+    /**
+     * \brief Sets tracked command list ID
+     *
+     * Used to work out if a resource has been used in the current
+     * command list and optimize certain transfer operations.
+     * \param [in] trackingId Tracking ID
+     * \param [in] access Tracked access
+     * \returns \c true if the tracking ID was updated, or \c false
+     *    if the resource was already tracked with the same ID.
+     */
+    bool trackId(uint64_t trackingId, DxvkAccess access) {
+      // Encode write access in the least significant bit
+      uint64_t trackId = (trackingId << 1u) + uint64_t(access == DxvkAccess::Write);
+
+      if (trackId <= m_trackId)
+        return false;
+
+      m_trackId = trackId;
+      return true;
+    }
+
+    /**
+     * \brief Checks whether a resource has been tracked
+     *
+     * \param [in] trackingId Current tracking ID
+     * \param [in] access Destination access
+     * \returns \c true if the resource has been used in a way that
+     *    prevents recordering commands with the given resource access.
+     */
+    bool isTracked(uint64_t trackingId, DxvkAccess access) const {
+      // We actually want to check for read access here so that this check only
+      // fails if the resource hasn't been used or if both accesses are read-only.
+      return m_trackId >= (trackingId << 1u) + uint64_t(access != DxvkAccess::Write);
+    }
+
+    /**
+     * \brief Resets tracking
+     *
+     * Marks the resource as unused in the current command list.
+     * Should be done when assigning new backing storage.
+     */
+    void resetTracking() {
+      m_trackId = 0u;
+    }
+
+    /**
+     * \brief Checks whether the buffer has been used for gfx stores
+     *
+     * \returns \c true if any graphics pipeline has written this
+     *    resource via transform feedback or a storage descriptor.
+     */
+    bool hasGfxStores() const {
+      return m_hasGfxStores;
+    }
+
+    /**
+     * \brief Tracks graphics pipeline side effects
+     *
+     * Must be called whenever the resource is written via graphics
+     * pipeline storage descriptors or transform feedback.
+     * \returns \c true if side effects were already tracked.
+     */
+    bool trackGfxStores() {
+      return std::exchange(m_hasGfxStores, true);
+    }
+
     /**
      * \brief Queries sparse page table
      *
@@ -510,13 +620,54 @@ namespace dxvk {
      */
     virtual DxvkSparsePageTable* getSparsePageTable() = 0;
 
+    /**
+     * \brief Allocates new backing storage with constraints
+     *
+     * \param [in] mode Allocation mode flags to control behaviour.
+     *    When relocating the resource to a preferred memory type,
+     *    \c NoFallback should be set, when defragmenting device
+     *    memory then \c NoAllocation should also be set.
+     * \returns \c true in the first field if the operation is
+     *    considered successful, i.e. if an new backing allocation
+     *    was successfully created or is unnecessary. The second
+     *    field will contain the new allocation itself.
+     */
+    virtual Rc<DxvkResourceAllocation> relocateStorage(
+            DxvkAllocationModes         mode) = 0;
+
+    /**
+     * \brief Sets debug name for the backing resource
+     *
+     * The caller \e must ensure that the backing resource
+     * is not being swapped out at the same time. This may
+     * also be ignored for certain types of resources for
+     * performance reasons, and has no effect if the device
+     * does not have debug layers enabled.
+     * \param [in] name New debug name
+     */
+    virtual void setDebugName(const char* name) = 0;
+
+    /**
+     * \brief Retrieves debug name
+     *
+     * May return an empty string if debug support is disabled.
+     * \returns The resource debug name
+     */
+    virtual const char* getDebugName() const = 0;
+
   private:
 
     std::atomic<uint64_t> m_useCount = { 0u };
+    uint64_t              m_trackId = { 0u };
+    uint64_t              m_cookie = { 0u };
+
+    bool                  m_hasGfxStores = false;
 
     static constexpr uint64_t getIncrement(DxvkAccess access) {
       return uint64_t(1u) << (uint32_t(access) * 20u);
     }
+
+    static std::atomic<uint64_t> s_cookie;
 
   };
 

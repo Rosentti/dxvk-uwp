@@ -35,8 +35,8 @@ namespace dxvk::hud {
   : m_device              (device),
     m_textSetLayout       (createSetLayout()),
     m_textPipelineLayout  (createPipelineLayout()) {
-    createShaderModule(m_textVs, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_text_vert), hud_text_vert);
-    createShaderModule(m_textFs, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_text_frag), hud_text_frag);
+    initShader(m_textVs, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_text_vert), hud_text_vert);
+    initShader(m_textFs, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_text_frag), hud_text_frag);
   }
   
   
@@ -46,9 +46,6 @@ namespace dxvk::hud {
     for (const auto& p : m_textPipelines)
       vk->vkDestroyPipeline(vk->device(), p.second, nullptr);
 
-    vk->vkDestroyShaderModule(vk->device(), m_textVs.stageInfo.module, nullptr);
-    vk->vkDestroyShaderModule(vk->device(), m_textFs.stageInfo.module, nullptr);
-
     vk->vkDestroyPipelineLayout(vk->device(), m_textPipelineLayout, nullptr);
     vk->vkDestroyDescriptorSetLayout(vk->device(), m_textSetLayout, nullptr);
   }
@@ -57,8 +54,12 @@ namespace dxvk::hud {
   void HudRenderer::beginFrame(
     const DxvkContextObjects& ctx,
     const Rc<DxvkImageView>&  dstView,
-          VkColorSpaceKHR     dstColorSpace,
     const HudOptions&         options) {
+    if (unlikely(m_device->debugFlags().test(DxvkDebugFlag::Capture))) {
+      ctx.cmd->cmdBeginDebugUtilsLabel(DxvkCmdBuffer::ExecBuffer,
+        vk::makeLabel(0xf0c0dc, "HUD"));
+    }
+
     if (!m_fontTextureView) {
       createFontResources();
       uploadFontResources(ctx);
@@ -87,6 +88,13 @@ namespace dxvk::hud {
   }
   
   
+  void HudRenderer::endFrame(
+    const DxvkContextObjects& ctx) {
+    if (unlikely(m_device->debugFlags().test(DxvkDebugFlag::Capture)))
+      ctx.cmd->cmdEndDebugUtilsLabel(DxvkCmdBuffer::ExecBuffer);
+  }
+
+
   void HudRenderer::drawText(
           uint32_t            size,
           HudPos              pos,
@@ -111,7 +119,6 @@ namespace dxvk::hud {
   void HudRenderer::flushDraws(
     const DxvkContextObjects& ctx,
     const Rc<DxvkImageView>&  dstView,
-          VkColorSpaceKHR     dstColorSpace,
     const HudOptions&         options) {
     if (m_textDraws.empty())
       return;
@@ -140,6 +147,7 @@ namespace dxvk::hud {
                             | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
       textBufferInfo.access = VK_ACCESS_SHADER_READ_BIT
                             | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+      textBufferInfo.debugName = "HUD text buffer";
 
       m_textBuffer = m_device->createBuffer(textBufferInfo,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
@@ -186,7 +194,7 @@ namespace dxvk::hud {
     VkDescriptorBufferInfo textBufferDescriptor = m_textBuffer->getDescriptor(textSizeAligned, drawInfoSize).buffer;
     VkDescriptorBufferInfo drawBufferDescriptor = m_textBuffer->getDescriptor(drawArgOffset, drawArgWriteSize).buffer;
 
-    drawTextIndirect(ctx, getPipelineKey(dstView, dstColorSpace),
+    drawTextIndirect(ctx, getPipelineKey(dstView),
       drawBufferDescriptor, textBufferDescriptor,
       m_textBufferView->handle(), m_textDraws.size());
 
@@ -255,11 +263,10 @@ namespace dxvk::hud {
 
 
   HudPipelineKey HudRenderer::getPipelineKey(
-    const Rc<DxvkImageView>&  dstView,
-          VkColorSpaceKHR     dstColorSpace) const {
+    const Rc<DxvkImageView>&  dstView) const {
     HudPipelineKey key;
     key.format = dstView->info().format;
-    key.colorSpace = dstColorSpace;
+    key.colorSpace = dstView->image()->info().colorSpace;
     return key;
   }
 
@@ -289,7 +296,7 @@ namespace dxvk::hud {
   }
 
 
-  void HudRenderer::createShaderModule(
+  void HudRenderer::initShader(
           HudShaderModule&    shader,
           VkShaderStageFlagBits stage,
           size_t              size,
@@ -297,22 +304,9 @@ namespace dxvk::hud {
     shader.moduleInfo.codeSize = size;
     shader.moduleInfo.pCode = code;
 
+    shader.stageInfo.pNext = &shader.moduleInfo;
     shader.stageInfo.stage = stage;
     shader.stageInfo.pName = "main";
-
-    if (m_device->features().khrMaintenance5.maintenance5
-     || m_device->features().extGraphicsPipelineLibrary.graphicsPipelineLibrary) {
-      shader.stageInfo.pNext = &shader.moduleInfo;
-      return;
-    }
-
-    auto vk = m_device->vkd();
-
-    VkResult vr = vk->vkCreateShaderModule(vk->device(),
-      &shader.moduleInfo, nullptr, &shader.stageInfo.module);
-
-    if (vr != VK_SUCCESS)
-      throw DxvkError(str::format("Failed to create swap chain blit shader module: ", vr));
   }
 
 
@@ -327,6 +321,7 @@ namespace dxvk::hud {
     fontBufferInfo.access = VK_ACCESS_TRANSFER_WRITE_BIT
                           | VK_ACCESS_TRANSFER_READ_BIT
                           | VK_ACCESS_SHADER_READ_BIT;
+    fontBufferInfo.debugName = "HUD font metadata";
 
     m_fontBuffer = m_device->createBuffer(fontBufferInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
@@ -348,6 +343,7 @@ namespace dxvk::hud {
     fontTextureInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     fontTextureInfo.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     fontTextureInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    fontTextureInfo.debugName = "HUD font texture";
 
     m_fontTexture = m_device->createImage(fontTextureInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
@@ -427,6 +423,7 @@ namespace dxvk::hud {
     depInfo.pImageMemoryBarriers = &imageBarrier;
 
     ctx.cmd->cmdPipelineBarrier(DxvkCmdBuffer::InitBuffer, &depInfo);
+    m_fontTexture->trackInitialization(imageBarrier.subresourceRange);
 
     VkBufferCopy2 bufferRegion = { VK_STRUCTURE_TYPE_BUFFER_COPY_2 };
     bufferRegion.srcOffset = uploadSlice.offset;

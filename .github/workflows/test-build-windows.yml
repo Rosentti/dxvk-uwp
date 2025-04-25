@@ -4,7 +4,7 @@ on: [push, pull_request, workflow_dispatch]
 
 jobs:
   build-set-windows:
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     steps:
     - name: Checkout code
@@ -12,6 +12,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: recursive
+        fetch-depth: 0
 
     - name: Setup glslangValidator
       shell: pwsh
@@ -54,14 +55,6 @@ jobs:
         meson --buildtype release --backend vs2022 build-msvc-x86
         msbuild -m build-msvc-x86/dxvk.sln
 
-    - name: Upload artifacts (x86)
-      uses: actions/upload-artifact@v4
-      with:
-        name: dxvk-${{ env.VERSION_NAME }}-msvc-x86-output
-        path: |
-          build-msvc-x86\**\*.pdb
-          build-msvc-x86\**\*.dll
-
     - name: Build MSVC x64
       shell: pwsh
       run: |
@@ -71,10 +64,18 @@ jobs:
         meson --buildtype release --backend vs2022 build-msvc-x64
         msbuild -m build-msvc-x64/dxvk.sln
 
-    - name: Upload artifacts (x64)
+    - name: Prepare artifacts
+      shell: pwsh
+      run: |
+        mkdir artifacts\x32
+        ls -Path build-msvc-x86\src -Include *.dll,*.pdb -Recurse
+          | cp -Destination (Join-Path -Path (pwd) -ChildPath artifacts\x32)
+        mkdir artifacts\x64
+        ls -Path build-msvc-x64\src -Include *.dll,*.pdb -Recurse
+          | cp -Destination (Join-Path -Path (pwd) -ChildPath artifacts\x64)
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: dxvk-${{ env.VERSION_NAME }}-msvc-amd64-output
-        path: |
-          build-msvc-x64\**\*.pdb
-          build-msvc-x64\**\*.dll
+        name: dxvk-${{ env.VERSION_NAME }}-msvc-output
+        path: artifacts\*

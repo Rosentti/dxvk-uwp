@@ -653,15 +653,41 @@ namespace dxvk {
       const D3DDISPLAYMODEEX*      pFullscreenDisplayMode,
             IDirect3DSwapChain9**  ppSwapChain);
 
+    /**
+     * @brief Sets the given sampler state
+     *
+     * @param StateSampler Sampler index (according to our internal way of storing samplers)
+     * @param Type Sampler state type to change
+     * @param Value State value
+     */
     HRESULT SetStateSamplerState(
         DWORD               StateSampler,
         D3DSAMPLERSTATETYPE Type,
         DWORD               Value);
 
+    /**
+     * @brief Sets the given sampler texture
+     *
+     * @param StateSampler Sampler index (according to our internal way of storing samplers)
+     * @param pTexture Texture to use
+     */
     HRESULT SetStateTexture(DWORD StateSampler, IDirect3DBaseTexture9* pTexture);
 
+    /**
+     * @brief Sets the transform for the given sampler
+     *
+     * @param idx Sampler index (according to our internal way of storing samplers)
+     * @param pMatrix Transform matrix
+     */
     HRESULT SetStateTransform(uint32_t idx, const D3DMATRIX* pMatrix);
 
+    /**
+     * @brief Sets the fixed function texture processing state
+     *
+     * @param Stage Sampler index (according to our internal way of storing samplers)
+     * @param Type Fixed function texture stage type
+     * @param Value Value for the state
+     */
     HRESULT SetStateTextureStageState(
             DWORD                      Stage,
             D3D9TextureStageStateTypes Type,
@@ -673,6 +699,9 @@ namespace dxvk {
 
     static DxvkDeviceFeatures GetDeviceFeatures(const Rc<DxvkAdapter>& adapter);
 
+    /**
+     * \brief Returns whether the Vulkan device supports the required features for ProcessVertices
+     */
     bool SupportsSWVP();
 
     bool IsExtended();
@@ -719,7 +748,7 @@ namespace dxvk {
 
     /**
      * \brief Unlocks a subresource of an image
-     * 
+     *
      * Passthrough to device unlock.
      * \param [in] Subresource The subresource of the image to unlock
      * \returns \c D3D_OK if the parameters are valid or D3DERR_INVALIDCALL if it fails.
@@ -729,10 +758,17 @@ namespace dxvk {
             UINT                    Face,
             UINT                    MipLevel);
 
+    /**
+     * \brief Uploads the given texture subresource from its local system memory copy.
+     */
     HRESULT FlushImage(
             D3D9CommonTexture*      pResource,
             UINT                    Subresource);
 
+    /**
+     * \brief Copies the given part of a texture from the local system memory copy of the source texture
+     * to the image of the destination texture.
+     */
     void UpdateTextureFromBuffer(
             D3D9CommonTexture*      pDestTexture,
             D3D9CommonTexture*      pSrcTexture,
@@ -752,6 +788,9 @@ namespace dxvk {
             void**                  ppbData,
             DWORD                   Flags);
 
+    /**
+     * \brief Uploads the given buffer from its local system memory copy.
+     */
     HRESULT FlushBuffer(
             D3D9CommonBuffer*       pResource);
 
@@ -760,7 +799,7 @@ namespace dxvk {
 
     /**
      * @brief Uploads data from D3DPOOL_SYSMEM + D3DUSAGE_DYNAMIC buffers and binds the temporary buffers.
-     * 
+     *
      * @param FirstVertexIndex The first vertex
      * @param NumVertices The number of vertices that are accessed. If this is 0, the vertex buffer binding will not be modified.
      * @param FirstIndex The first index
@@ -787,14 +826,15 @@ namespace dxvk {
     void Flush();
     void FlushAndSync9On12();
 
-    void EndFrame();
+    void BeginFrame(Rc<DxvkLatencyTracker> LatencyTracker, uint64_t FrameId);
+    void EndFrame(Rc<DxvkLatencyTracker> LatencyTracker);
 
     void UpdateActiveRTs(uint32_t index);
 
     template <uint32_t Index>
     void UpdateAnyColorWrites();
 
-    void UpdateActiveTextures(uint32_t index, DWORD combinedUsage);
+    void UpdateTextureBitmasks(uint32_t index, DWORD combinedUsage);
 
     void UpdateActiveHazardsRT(uint32_t rtMask);
 
@@ -803,6 +843,42 @@ namespace dxvk {
     void MarkRenderHazards();
 
     void UpdateActiveFetch4(uint32_t stateSampler);
+
+    /**
+     * @brief Sets the mismatching texture type bits for all samplers if necessary.
+     *
+     * This function will check all samplers the shader uses and set the  set the mismatching texture type bit for the given sampler if it does not
+     * match the texture type expected by the respective shader.
+     *
+     * It will *not* unset the bit if the texture type does match.
+     *
+     * @param stateSampler Sampler index (according to our internal way of storing samplers)
+     */
+
+     /**
+      * @brief Sets the mismatching texture type bits for all samplers if necessary.
+      *
+      * This function will check all samplers the shader uses and set the  set the mismatching texture type bit for the given sampler if it does not
+      * match the texture type expected by the shader.
+      *
+      * @param shader The shader
+      * @param shaderSamplerMask Mask of all samplers that the shader uses (according to our internal way of storing samplers)
+      * @param shaderSamplerOffset First index of the shader's samplers according to our internal way of storing samplers.
+      *                            Used to transform the sampler indices that are relative to the entire pipeline to ones relative to the shader.
+      */
+    void UpdateTextureTypeMismatchesForShader(const D3D9CommonShader* shader, uint32_t shaderSamplerMask, uint32_t shaderSamplerOffset);
+
+    /**
+     * @brief Sets the mismatching texture type bit for the given sampler.
+     *
+     * This function will set the mismatching texture type bit for the given sampler if it does not
+     * match the texture type expected by the respective shader.
+     *
+     * It will *not* unset the bit if the texture type does match.
+     *
+     * @param stateSampler Sampler index (according to our internal way of storing samplers)
+     */
+    void UpdateTextureTypeMismatchesForTexture(uint32_t stateSampler);
 
     void UploadManagedTexture(D3D9CommonTexture* pResource);
 
@@ -876,10 +952,22 @@ namespace dxvk {
     void UploadConstants();
     
     void UpdateClipPlanes();
-    
+
+    /**
+     * \brief Updates the push constant data at the given offset with data from the specified pointer.
+     *
+     * \param Offset Offset at which the push constant data gets written.
+     * \param Length Length of the push constant data to write.
+     * \param pData Push constant data
+     */
     template <uint32_t Offset, uint32_t Length>
     void UpdatePushConstant(const void* pData);
 
+    /**
+     * \brief Updates the specified push constant based on the device state.
+     *
+     * \param Item Render state push constant to update
+     */
     template <D3D9RenderStateItem Item>
     void UpdatePushConstant();
 
@@ -963,31 +1051,47 @@ namespace dxvk {
             VkImageLayout            OldLayout,
             VkImageLayout            NewLayout);
 
-    const D3D9ConstantLayout& GetVertexConstantLayout() { return m_vsLayout; }
-    const D3D9ConstantLayout& GetPixelConstantLayout()  { return m_psLayout; }
+    const D3D9ConstantLayout& GetVertexConstantLayout() { return m_consts[DxsoProgramType::VertexShader].layout; }
+    const D3D9ConstantLayout& GetPixelConstantLayout()  { return m_consts[DxsoProgramType::PixelShader].layout; }
 
     void ResetState(D3DPRESENT_PARAMETERS* pPresentationParameters);
     HRESULT ResetSwapChain(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
 
     HRESULT InitialReset(D3DPRESENT_PARAMETERS* pPresentationParameters, D3DDISPLAYMODEEX* pFullscreenDisplayMode);
 
+    /**
+     * \brief Returns the allocator used for unmappable system memory texture data
+     */
     D3D9MemoryAllocator* GetAllocator() {
       return &m_memoryAllocator;
     }
 
+    /**
+     * \brief Gets the pointer of the system memory copy of the texture
+     *
+     * Also tracks the texture if it is unmappable.
+     */
     void* MapTexture(D3D9CommonTexture* pTexture, UINT Subresource);
+
+    /**
+     * \brief Moves the texture to the front of the LRU list of mapped textures
+     */
     void TouchMappedTexture(D3D9CommonTexture* pTexture);
+
+    /**
+     * \brief Removes the texture from the LRU list of mapped textures
+     */
     void RemoveMappedTexture(D3D9CommonTexture* pTexture);
+
+    /**
+     * \brief Returns whether the device is currently recording a StateBlock
+     */
+    bool ShouldRecord() const {
+      return m_recorder != nullptr;
+    }
 
     bool IsD3D8Compatible() const {
       return m_isD3D8Compatible;
-    }
-
-    void SetD3D8CompatibilityMode(bool compatMode) {
-      if (compatMode)
-        Logger::info("The D3D9 device is now operating in D3D8 compatibility mode.");
-
-      m_isD3D8Compatible = compatMode;
     }
 
     // Device Lost
@@ -998,34 +1102,59 @@ namespace dxvk {
     void NotifyFullscreen(HWND window, bool fullscreen);
     void NotifyWindowActivated(HWND window, bool activated);
 
+    /**
+     * \brief Increases the amount of D3DPOOL_DEFAULT resources that block a device reset
+     */
     void IncrementLosableCounter() {
       m_losableResourceCounter++;
     }
 
+    /**
+     * \brief Decreases the amount of D3DPOOL_DEFAULT resources that block a device reset
+     */
     void DecrementLosableCounter() {
       m_losableResourceCounter--;
     }
 
+    /**
+     * \brief Returns whether the device is configured to only support vertex processing.
+     */
     bool CanOnlySWVP() const {
       return m_behaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING;
     }
 
+    /**
+     * \brief Returns whether the device can be set to do software vertex processing.
+     * It may also be set up to only support software vertex processing.
+     */
     bool CanSWVP() const {
       return m_behaviorFlags & (D3DCREATE_MIXED_VERTEXPROCESSING | D3DCREATE_SOFTWARE_VERTEXPROCESSING);
     }
 
+    /**
+     * \brief Returns whether or not the device is currently set to do software vertex processing.
+     */
     bool IsSWVP() const {
       return m_isSWVP;
     }
 
+    /**
+     * \brief Returns the number of vertex shader modules generated for fixed function state.
+     */
     UINT GetFixedFunctionVSCount() const {
       return m_ffModules.GetVSCount();
     }
 
+    /**
+     * \brief Returns the number of fragment shader modules generated for fixed function state.
+     */
     UINT GetFixedFunctionFSCount() const {
       return m_ffModules.GetFSCount();
     }
 
+    /**
+     * \brief Returns the number of shader modules generated for ProcessVertices.
+     */
     UINT GetSWVPShaderCount() const {
       return m_swvpEmulator.GetShaderCount();
     }
@@ -1072,9 +1201,13 @@ namespace dxvk {
       }
     }
 
-    // Device Reset detection for D3D9SwapChainEx::Present
-    bool IsDeviceReset() {
-      return std::exchange(m_deviceHasBeenReset, false);
+    /**
+     * \brief Queries current reset counter
+     * Used for the deferred surface creation workaround.
+     * (Device Reset detection for D3D9SwapChainEx::Present)
+     */
+    uint32_t GetResetCounter() {
+      return m_resetCtr;
     }
 
     template <bool Synchronize9On12>
@@ -1082,13 +1215,20 @@ namespace dxvk {
 
     void DetermineConstantLayouts(bool canSWVP);
 
+    /**
+     * \brief Allocates buffer memory for DrawPrimitiveUp draws
+     */
     D3D9BufferSlice AllocUPBuffer(VkDeviceSize size);
 
+    /**
+     * \brief Allocates buffer memory for resource uploads
+     */
     D3D9BufferSlice AllocStagingBuffer(VkDeviceSize size);
 
+    /**
+     * \brief Waits until the amount of used staging memory is below a certain threshold.
+     */
     void WaitStagingBuffer();
-
-    bool ShouldRecord();
 
     HRESULT               CreateShaderModule(
             D3D9CommonShader*     pShaderModule,
@@ -1105,6 +1245,9 @@ namespace dxvk {
       return (vertexCount - 1) * stride + std::max(m_state.vertexDecl->GetSize(0), stride);
     }
 
+    /**
+     * \brief Writes data to the given pointer and zeroes any access buffer space
+     */
     inline void FillUPVertexBuffer(void* buffer, const void* userData, uint32_t dataSize, uint32_t bufferSize) {
       uint8_t* data = reinterpret_cast<uint8_t*>(buffer);
       // Don't copy excess data if we don't end up needing it.
@@ -1140,8 +1283,7 @@ namespace dxvk {
     template <DxsoProgramType  ProgramType,
               D3D9ConstantType ConstantType>
     inline uint32_t DetermineHardwareRegCount() const {
-      const auto& layout = ProgramType == DxsoProgramType::VertexShader
-        ? m_vsLayout : m_psLayout;
+      const auto& layout = m_consts[ProgramType].layout;
 
       switch (ConstantType) {
         default:
@@ -1256,25 +1398,24 @@ namespace dxvk {
       D3D9CommonTexture* pResource,
       UINT Subresource);
 
-    void UnmapTextures();
-
     uint64_t GetCurrentSequenceNumber();
 
     /**
-     * @brief Get the swapchain that was used the most recently for presenting
+     * \brief Will unmap the least recently used textures if the amount of mapped texture memory exceeds a threshold.
+     */
+    void UnmapTextures();
+
+    /**
+     * \brief Get the swapchain that was used the most recently for presenting
      * Has to be externally synchronized.
-     * 
-     * @return D3D9SwapChainEx* Swapchain
      */
     D3D9SwapChainEx* GetMostRecentlyUsedSwapchain() {
       return m_mostRecentlyUsedSwapchain;
     }
 
     /**
-     * @brief Set the swapchain that was used the most recently for presenting
+     * \brief Set the swapchain that was used the most recently for presenting
      * Has to be externally synchronized.
-     * 
-     * @param swapchain Swapchain
      */
     void SetMostRecentlyUsedSwapchain(D3D9SwapChainEx* swapchain) {
       m_mostRecentlyUsedSwapchain = swapchain;
@@ -1312,6 +1453,8 @@ namespace dxvk {
       return m_state.renderTargets[Index] != nullptr
         && !m_state.renderTargets[Index]->IsNull();
     }
+
+    GpuFlushType GetMaxFlushType() const;
 
     Com<D3D9InterfaceEx>            m_parent;
     D3DDEVTYPE                      m_deviceType;
@@ -1382,6 +1525,7 @@ namespace dxvk {
     uint32_t                        m_drefClamp = 0;
     uint32_t                        m_cubeTextures = 0;
     uint32_t                        m_textureTypes = 0;
+    uint32_t                        m_mismatchingTextureTypes = 0;
     uint32_t                        m_projectionBitfield  = 0;
 
     uint32_t                        m_dirtySamplerStates = 0;
@@ -1421,7 +1565,7 @@ namespace dxvk {
     D3D9ShaderMasks                 m_psShaderMasks = FixedFunctionMask;
 
     bool                            m_isSWVP;
-    bool                            m_isD3D8Compatible = false;
+    bool                            m_isD3D8Compatible;
     bool                            m_amdATOC          = false;
     bool                            m_nvATOC           = false;
     bool                            m_ffZTest          = false;
@@ -1429,7 +1573,7 @@ namespace dxvk {
     VkImageLayout                   m_hazardLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     bool                            m_usingGraphicsPipelines = false;
-    bool                            m_deviceHasBeenReset = false;
+    uint32_t                        m_resetCtr = 0u;
 
     DxvkDepthBiasRepresentation     m_depthBiasRepresentation = { VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORMAT_EXT, false };
     float                           m_depthBiasScale  = 0.0f;
@@ -1437,15 +1581,6 @@ namespace dxvk {
     uint32_t                        m_robustSSBOAlignment     = 1;
     uint32_t                        m_robustUBOAlignment      = 1;
 
-    uint32_t                        m_vsFloatConstsCount = 0;
-    uint32_t                        m_vsIntConstsCount   = 0;
-    uint32_t                        m_vsBoolConstsCount  = 0;
-    uint32_t                        m_psFloatConstsCount = 0;
-    VkDeviceSize                    m_boundVSConstantsBufferSize = 0;
-    VkDeviceSize                    m_boundPSConstantsBufferSize = 0;
-
-    D3D9ConstantLayout              m_vsLayout;
-    D3D9ConstantLayout              m_psLayout;
     D3D9ConstantSets                m_consts[DxsoProgramTypes::Count];
 	
 	D3D9UserDefinedAnnotation*      m_annotation = nullptr;

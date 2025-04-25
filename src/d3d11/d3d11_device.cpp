@@ -183,7 +183,7 @@ namespace dxvk {
     desc.TextureLayout  = D3D11_TEXTURE_LAYOUT_UNDEFINED;
     
     ID3D11Texture2D1* texture2D = nullptr;
-    HRESULT hr = CreateTexture2D1(&desc, pInitialData, ppTexture2D ? &texture2D : nullptr);
+    HRESULT hr = CreateTexture2DBase(&desc, pInitialData, ppTexture2D ? &texture2D : nullptr);
 
     if (hr != S_OK)
       return hr;
@@ -202,6 +202,14 @@ namespace dxvk {
     if (!pDesc)
       return E_INVALIDARG;
     
+    return CreateTexture2DBase(pDesc, pInitialData, ppTexture2D);
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture2DBase(
+    const D3D11_TEXTURE2D_DESC1*  pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+          ID3D11Texture2D1**      ppTexture2D) {
     D3D11_COMMON_TEXTURE_DESC desc;
     desc.Width          = pDesc->Width;
     desc.Height         = pDesc->Height;
@@ -262,7 +270,7 @@ namespace dxvk {
     desc.TextureLayout  = D3D11_TEXTURE_LAYOUT_UNDEFINED;
     
     ID3D11Texture3D1* texture3D = nullptr;
-    HRESULT hr = CreateTexture3D1(&desc, pInitialData, ppTexture3D ? &texture3D : nullptr);
+    HRESULT hr = CreateTexture3DBase(&desc, pInitialData, ppTexture3D ? &texture3D : nullptr);
 
     if (hr != S_OK)
       return hr;
@@ -280,7 +288,15 @@ namespace dxvk {
 
     if (!pDesc)
       return E_INVALIDARG;
-    
+
+    return CreateTexture3DBase(pDesc, pInitialData, ppTexture3D);
+  }
+  
+  
+  HRESULT STDMETHODCALLTYPE D3D11Device::CreateTexture3DBase(
+    const D3D11_TEXTURE3D_DESC1*  pDesc,
+    const D3D11_SUBRESOURCE_DATA* pInitialData,
+          ID3D11Texture3D1**      ppTexture3D) {
     D3D11_COMMON_TEXTURE_DESC desc;
     desc.Width          = pDesc->Width;
     desc.Height         = pDesc->Height;
@@ -325,6 +341,9 @@ namespace dxvk {
           ID3D11ShaderResourceView**        ppSRView) {
     InitReturnPtr(ppSRView);
 
+    if (!pResource)
+      return E_INVALIDARG;
+
     uint32_t plane = GetViewPlaneIndex(pResource, pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC1 desc = pDesc
@@ -333,7 +352,7 @@ namespace dxvk {
     
     ID3D11ShaderResourceView1* view = nullptr;
 
-    HRESULT hr = CreateShaderResourceView1(pResource,
+    HRESULT hr = CreateShaderResourceViewBase(pResource,
       pDesc    ? &desc : nullptr,
       ppSRView ? &view : nullptr);
     
@@ -353,7 +372,15 @@ namespace dxvk {
 
     if (!pResource)
       return E_INVALIDARG;
-    
+
+    return CreateShaderResourceViewBase(pResource, pDesc, ppSRView);
+  }
+  
+  
+  HRESULT STDMETHODCALLTYPE D3D11Device::CreateShaderResourceViewBase(
+          ID3D11Resource*                   pResource,
+    const D3D11_SHADER_RESOURCE_VIEW_DESC1* pDesc,
+          ID3D11ShaderResourceView1**       ppSRView) {
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
     
@@ -402,21 +429,24 @@ namespace dxvk {
           ID3D11UnorderedAccessView**       ppUAView) {
     InitReturnPtr(ppUAView);
 
+    if (!pResource)
+      return E_INVALIDARG;
+
     uint32_t plane = GetViewPlaneIndex(pResource, pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN);
 
     D3D11_UNORDERED_ACCESS_VIEW_DESC1 desc = pDesc
       ? D3D11UnorderedAccessView::PromoteDesc(pDesc, plane)
       : D3D11_UNORDERED_ACCESS_VIEW_DESC1();
-    
+
     ID3D11UnorderedAccessView1* view = nullptr;
 
-    HRESULT hr = CreateUnorderedAccessView1(pResource,
+    HRESULT hr = CreateUnorderedAccessViewBase(pResource,
       pDesc    ? &desc : nullptr,
       ppUAView ? &view : nullptr);
-    
+
     if (hr != S_OK)
       return hr;
-    
+
     *ppUAView = view;
     return S_OK;
   }
@@ -430,7 +460,15 @@ namespace dxvk {
     
     if (!pResource)
       return E_INVALIDARG;
-    
+
+    return CreateUnorderedAccessViewBase(pResource, pDesc, ppUAView);
+  }
+  
+  
+  HRESULT STDMETHODCALLTYPE D3D11Device::CreateUnorderedAccessViewBase(
+          ID3D11Resource*                   pResource,
+    const D3D11_UNORDERED_ACCESS_VIEW_DESC1* pDesc,
+          ID3D11UnorderedAccessView1**      ppUAView) {
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
 
@@ -481,6 +519,9 @@ namespace dxvk {
           ID3D11RenderTargetView**          ppRTView) {
     InitReturnPtr(ppRTView);
 
+    if (!pResource)
+      return E_INVALIDARG;
+
     uint32_t plane = GetViewPlaneIndex(pResource, pDesc ? pDesc->Format : DXGI_FORMAT_UNKNOWN);
 
     D3D11_RENDER_TARGET_VIEW_DESC1 desc = pDesc
@@ -489,7 +530,7 @@ namespace dxvk {
     
     ID3D11RenderTargetView1* view = nullptr;
 
-    HRESULT hr = CreateRenderTargetView1(pResource,
+    HRESULT hr = CreateRenderTargetViewBase(pResource,
       pDesc    ? &desc : nullptr,
       ppRTView ? &view : nullptr);
     
@@ -509,7 +550,15 @@ namespace dxvk {
 
     if (!pResource)
       return E_INVALIDARG;
-    
+
+    return CreateRenderTargetViewBase(pResource, pDesc, ppRTView);
+  }
+  
+  
+  HRESULT STDMETHODCALLTYPE D3D11Device::CreateRenderTargetViewBase(
+          ID3D11Resource*                   pResource,
+    const D3D11_RENDER_TARGET_VIEW_DESC1*   pDesc,
+          ID3D11RenderTargetView1**         ppRTView) {
     // DXVK only supports render target views for image resources
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
@@ -619,29 +668,29 @@ namespace dxvk {
     // works, provided the shader does not have any actual inputs
     if (!pInputElementDescs)
       return E_INVALIDARG;
-    
+
     try {
       DxbcReader dxbcReader(reinterpret_cast<const char*>(
         pShaderBytecodeWithInputSignature), BytecodeLength);
       DxbcModule dxbcModule(dxbcReader);
-      
+
       const Rc<DxbcIsgn> inputSignature = dxbcModule.isgn();
 
       uint32_t attrMask = 0;
       uint32_t bindMask = 0;
       uint32_t locationMask = 0;
       uint32_t bindingsDefined = 0;
-      
+
       std::array<DxvkVertexAttribute, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> attrList = { };
       std::array<DxvkVertexBinding,   D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> bindList = { };
-      
+
       for (uint32_t i = 0; i < NumElements; i++) {
         const DxbcSgnEntry* entry = inputSignature->find(
           pInputElementDescs[i].SemanticName,
           pInputElementDescs[i].SemanticIndex, 0);
 
         // Create vertex input attribute description
-        DxvkVertexAttribute attrib;
+        DxvkVertexAttribute attrib = { };
         attrib.location = entry != nullptr ? entry->registerId : 0;
         attrib.binding  = pInputElementDescs[i].InputSlot;
         attrib.format   = LookupFormat(pInputElementDescs[i].Format, DXGI_VK_FORMAT_MODE_COLOR).Format;
@@ -665,17 +714,18 @@ namespace dxvk {
               break;
             }
           }
-        } else if (attrib.offset & (alignment - 1))
+        } else if (attrib.offset & (alignment - 1)) {
           return E_INVALIDARG;
+        }
 
         attrList.at(i) = attrib;
 
         // Create vertex input binding description. The
         // stride is dynamic state in D3D11 and will be
         // set by D3D11DeviceContext::IASetVertexBuffers.
-        DxvkVertexBinding binding;
+        DxvkVertexBinding binding = { };
         binding.binding   = pInputElementDescs[i].InputSlot;
-        binding.fetchRate = pInputElementDescs[i].InstanceDataStepRate;
+        binding.divisor   = pInputElementDescs[i].InstanceDataStepRate;
         binding.inputRate = pInputElementDescs[i].InputSlotClass == D3D11_INPUT_PER_INSTANCE_DATA
           ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
         binding.extent    = entry ? uint32_t(attrib.offset + formatInfo->elementSize) : 0u;
@@ -1202,7 +1252,7 @@ namespace dxvk {
     desc.ContextType = D3D11_CONTEXT_TYPE_ALL;
 
     ID3D11Query1* query = nullptr;
-    HRESULT hr = CreateQuery1(&desc, ppQuery ? &query : nullptr);
+    HRESULT hr = CreateQueryBase(&desc, ppQuery ? &query : nullptr);
 
     if (hr != S_OK)
       return hr;
@@ -1219,7 +1269,14 @@ namespace dxvk {
 
     if (!pQueryDesc)
       return E_INVALIDARG;
-    
+
+    return CreateQueryBase(pQueryDesc, ppQuery);
+  }
+
+  
+  HRESULT STDMETHODCALLTYPE D3D11Device::CreateQueryBase(
+    const D3D11_QUERY_DESC1*          pQueryDesc,
+          ID3D11Query1**              ppQuery) {
     HRESULT hr = D3D11Query::ValidateDesc(pQueryDesc);
 
     if (FAILED(hr))
@@ -1396,10 +1453,10 @@ namespace dxvk {
      || texture->CountSubresources() <= SrcSubresource)
       return;
 
-    D3D11_MAP map = texture->GetMapType(SrcSubresource);
+    uint32_t map = texture->GetMapType(SrcSubresource);
 
-    if (map != D3D11_MAP_READ
-     && map != D3D11_MAP_READ_WRITE)
+    if (map != uint32_t(D3D11_MAP_READ)
+     && map != uint32_t(D3D11_MAP_READ_WRITE))
       return;
 
     CopySubresourceData(
@@ -1425,11 +1482,11 @@ namespace dxvk {
      || texture->CountSubresources() <= DstSubresource)
       return;
 
-    D3D11_MAP map = texture->GetMapType(DstSubresource);
+    uint32_t map = texture->GetMapType(DstSubresource);
 
-    if (map != D3D11_MAP_WRITE
-     && map != D3D11_MAP_WRITE_NO_OVERWRITE
-     && map != D3D11_MAP_READ_WRITE)
+    if (map != uint32_t(D3D11_MAP_WRITE)
+     && map != uint32_t(D3D11_MAP_WRITE_NO_OVERWRITE)
+     && map != uint32_t(D3D11_MAP_READ_WRITE))
       return;
 
     CopySubresourceData(
@@ -1961,6 +2018,9 @@ namespace dxvk {
           size_t                  BytecodeLength,
           ID3D11ClassLinkage*     pClassLinkage,
     const DxbcModuleInfo*         pModuleInfo) {
+    if (!BytecodeLength || !pShaderBytecode)
+      return E_INVALIDARG;
+
     if (pClassLinkage != nullptr)
       Logger::warn("D3D11Device::CreateShaderModule: Class linkage not supported");
 
@@ -2376,11 +2436,7 @@ namespace dxvk {
       D3D11_COMMON_TEXTURE_SUBRESOURCE_LAYOUT layout = pTexture->GetSubresourceLayout(aspect, Subresource);
 
       // Compute actual map pointer, accounting for the region offset
-      VkDeviceSize mapOffset = pTexture->ComputeMappedOffset(Subresource, i, offset);
-
-      void* mapPtr = pTexture->GetMapMode() == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER
-        ? pTexture->GetMappedBuffer(Subresource)->mapPtr(mapOffset)
-        : image->mapPtr(mapOffset);
+      void* mapPtr = pTexture->GetMapPtr(Subresource, pTexture->ComputeMappedOffset(Subresource, i, offset));
 
       if constexpr (std::is_const<Void>::value) {
         // WriteToSubresource
@@ -2773,7 +2829,7 @@ namespace dxvk {
       feedback = ctx->ensureImageCompatibility(cImage, usageInfo);
     });
 
-    m_device->GetContext()->InjectCsChunk(std::move(chunk), true);
+    m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
 
     if (!feedback) {
       Logger::err(str::format("Failed to lock image:"
@@ -2797,7 +2853,7 @@ namespace dxvk {
       ctx->ensureBufferAddress(cBuffer);
     });
 
-    m_device->GetContext()->InjectCsChunk(std::move(chunk), true);
+    m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
   }
 
 
@@ -3003,6 +3059,198 @@ namespace dxvk {
 
 
 
+  D3D11ReflexDevice::D3D11ReflexDevice(
+          D3D11DXGIDevice*        pContainer,
+          D3D11Device*            pDevice)
+  : m_container(pContainer), m_device(pDevice) {
+    auto dxvkDevice = pDevice->GetDXVKDevice();
+
+    m_reflexEnabled = dxvkDevice->features().nvLowLatency2
+                   && dxvkDevice->config().latencySleep == Tristate::Auto;
+  }
+
+
+  D3D11ReflexDevice::~D3D11ReflexDevice() {
+
+  }
+
+
+  ULONG STDMETHODCALLTYPE D3D11ReflexDevice::AddRef() {
+    return m_container->AddRef();
+  }
+
+
+  ULONG STDMETHODCALLTYPE D3D11ReflexDevice::Release() {
+    return m_container->Release();
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::QueryInterface(
+          REFIID                        riid,
+          void**                        ppvObject) {
+    return m_container->QueryInterface(riid, ppvObject);
+  }
+
+
+  BOOL STDMETHODCALLTYPE D3D11ReflexDevice::SupportsLowLatency() {
+    return m_reflexEnabled;
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::LatencySleep() {
+    if (!m_reflexEnabled)
+      return DXGI_ERROR_INVALID_CALL;
+
+    // Don't keep object locked while sleeping
+    Rc<DxvkReflexLatencyTrackerNv> tracker;
+
+    { std::lock_guard lock(m_mutex);
+      tracker = m_tracker;
+    }
+
+    if (tracker)
+      tracker->latencySleep();
+
+    return S_OK;
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::SetLatencySleepMode(
+          BOOL                          LowLatencyEnable,
+          BOOL                          LowLatencyBoost,
+          UINT32                        MinIntervalUs) {
+    if (!m_reflexEnabled)
+      return DXGI_ERROR_INVALID_CALL;
+
+    std::lock_guard lock(m_mutex);
+
+    if (m_tracker) {
+      m_tracker->setLatencySleepMode(
+        LowLatencyEnable, LowLatencyBoost, MinIntervalUs);
+    }
+
+    // Write back in case we have no swapchain yet
+    m_enableLowLatency = LowLatencyEnable;
+    m_enableBoost      = LowLatencyBoost;
+    m_minIntervalUs    = MinIntervalUs;
+    return S_OK;
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::SetLatencyMarker(
+          UINT64                        FrameId,
+          UINT32                        MarkerType) {
+    if (!m_reflexEnabled)
+      return DXGI_ERROR_INVALID_CALL;
+
+    std::lock_guard lock(m_mutex);
+
+    if (m_tracker) {
+      auto marker = VkLatencyMarkerNV(MarkerType);
+      m_tracker->setLatencyMarker(FrameId, marker);
+
+      if (marker == VK_LATENCY_MARKER_RENDERSUBMIT_START_NV) {
+        m_device->GetContext()->InjectCs(DxvkCsQueue::Ordered, [
+          cTracker  = m_tracker,
+          cFrameId  = FrameId
+        ] (DxvkContext* ctx) {
+          uint64_t frameId = cTracker->frameIdFromAppFrameId(cFrameId);
+
+          if (frameId)
+            ctx->beginLatencyTracking(cTracker, frameId);
+        });
+      } else if (marker == VK_LATENCY_MARKER_RENDERSUBMIT_END_NV) {
+        m_device->GetContext()->InjectCs(DxvkCsQueue::Ordered, [
+          cTracker  = m_tracker
+        ] (DxvkContext* ctx) {
+          ctx->endLatencyTracking(cTracker);
+        });
+      }
+    }
+
+    return S_OK;
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D11ReflexDevice::GetLatencyInfo(
+          D3D_LOW_LATENCY_RESULTS*      pLowLatencyResults) {
+    constexpr static size_t FrameCount = 64;
+
+    if (!pLowLatencyResults)
+      return E_INVALIDARG;
+
+    for (size_t i = 0; i < FrameCount; i++)
+      pLowLatencyResults->frameReports[i] = D3D_LOW_LATENCY_FRAME_REPORT();
+
+    if (!m_reflexEnabled)
+      return DXGI_ERROR_INVALID_CALL;
+
+    std::lock_guard lock(m_mutex);
+
+    if (!m_tracker)
+      return S_OK;
+
+    // Apparently we have to report all 64 frames, or nothing
+    std::array<DxvkReflexFrameReport, FrameCount> reports = { };
+    uint32_t reportCount = m_tracker->getFrameReports(FrameCount, reports.data());
+
+    if (reportCount < FrameCount)
+      return S_OK;
+
+    for (uint32_t i = 0; i < FrameCount; i++) {
+      auto& src = reports[i];
+      auto& dst = pLowLatencyResults->frameReports[i];
+
+      dst.frameID = src.report.presentID;
+      dst.inputSampleTime = src.report.inputSampleTimeUs;
+      dst.simStartTime = src.report.simStartTimeUs;
+      dst.simEndTime = src.report.simEndTimeUs;
+      dst.renderSubmitStartTime = src.report.renderSubmitStartTimeUs;
+      dst.renderSubmitEndTime = src.report.renderSubmitEndTimeUs;
+      dst.presentStartTime = src.report.presentStartTimeUs;
+      dst.presentEndTime = src.report.presentEndTimeUs;
+      dst.driverStartTime = src.report.driverStartTimeUs;
+      dst.driverEndTime = src.report.driverEndTimeUs;
+      dst.osRenderQueueStartTime = src.report.osRenderQueueStartTimeUs;
+      dst.osRenderQueueEndTime = src.report.osRenderQueueEndTimeUs;
+      dst.gpuRenderStartTime = src.report.gpuRenderStartTimeUs;
+      dst.gpuRenderEndTime = src.report.gpuRenderEndTimeUs;
+      dst.gpuActiveRenderTimeUs = src.gpuActiveTimeUs;
+      dst.gpuFrameTimeUs = 0;
+
+      if (i) {
+        dst.gpuFrameTimeUs = reports[i - 0].report.gpuRenderEndTimeUs
+                           - reports[i - 1].report.gpuRenderEndTimeUs;
+      }
+    }
+
+    return S_OK;
+  }
+
+
+  void D3D11ReflexDevice::RegisterLatencyTracker(
+          Rc<DxvkLatencyTracker>          Tracker) {
+    std::lock_guard lock(m_mutex);
+
+    if (m_tracker)
+      return;
+
+    if ((m_tracker = dynamic_cast<DxvkReflexLatencyTrackerNv*>(Tracker.ptr())))
+      m_tracker->setLatencySleepMode(m_enableLowLatency, m_enableBoost, m_minIntervalUs);
+  }
+
+
+  void D3D11ReflexDevice::UnregisterLatencyTracker(
+          Rc<DxvkLatencyTracker>          Tracker) {
+    std::lock_guard lock(m_mutex);
+
+    if (m_tracker == Tracker)
+      m_tracker = nullptr;
+  }
+
+
+
+
   DXGIVkSwapChainFactory::DXGIVkSwapChainFactory(
           D3D11DXGIDevice*        pContainer,
           D3D11Device*            pDevice)
@@ -3104,9 +3352,11 @@ namespace dxvk {
     m_d3d11DeviceExt(this, &m_d3d11Device),
     m_d3d11Interop  (this, &m_d3d11Device),
     m_d3d11Video    (this, &m_d3d11Device),
+    m_d3d11Reflex   (this, &m_d3d11Device),
     m_d3d11on12     (this, &m_d3d11Device, pD3D12Device, pD3D12Queue),
     m_metaDevice    (this),
-    m_dxvkFactory   (this, &m_d3d11Device) {
+    m_dxvkFactory   (this, &m_d3d11Device),
+    m_destructionNotifier(this) {
 
   }
   
@@ -3176,8 +3426,14 @@ namespace dxvk {
       return S_OK;
     }
 
+    if (riid == __uuidof(ID3DLowLatencyDevice)) {
+      *ppvObject = ref(&m_d3d11Reflex);
+      return S_OK;
+    }
+
     if (m_d3d11on12.Is11on12Device()) {
-      if (riid == __uuidof(ID3D11On12Device)) {
+      if (riid == __uuidof(ID3D11On12Device)
+       || riid == __uuidof(ID3D11On12Device1_DXVK)) {
         *ppvObject = ref(&m_d3d11on12);
         return S_OK;
       }
@@ -3187,6 +3443,11 @@ namespace dxvk {
       Com<ID3D11DeviceContext> context;
       m_d3d11Device.GetImmediateContext(&context);
       return context->QueryInterface(riid, ppvObject);
+    }
+
+    if (riid == __uuidof(ID3DDestructionNotifier)) {
+      *ppvObject = ref(&m_destructionNotifier);
+      return S_OK;
     }
 
     if (riid == __uuidof(ID3D11Debug))

@@ -160,7 +160,7 @@ namespace dxvk {
     // Native drivers won't allow the creation of DXT format
     // textures that aren't aligned to block dimensions.
     if (IsDXTFormat(pDesc->Format)) {
-      D3D9_FORMAT_BLOCK_SIZE blockSize = GetFormatBlockSize(pDesc->Format);
+      D3D9_FORMAT_BLOCK_SIZE blockSize = GetFormatAlignedBlockSize(pDesc->Format);
 
       if ((blockSize.Width  && (pDesc->Width  & (blockSize.Width  - 1)))
        || (blockSize.Height && (pDesc->Height & (blockSize.Height - 1))))
@@ -178,11 +178,46 @@ namespace dxvk {
     if (pDesc->Usage & D3DUSAGE_WRITEONLY)
       return D3DERR_INVALIDCALL;
 
+    constexpr DWORD usageRTOrDS = D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL;
+
     // RENDERTARGET and DEPTHSTENCIL must be default pool
-    constexpr DWORD incompatibleUsages = D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL;
-    if (pDesc->Pool != D3DPOOL_DEFAULT && (pDesc->Usage & incompatibleUsages))
+    if (pDesc->Pool != D3DPOOL_DEFAULT && (pDesc->Usage & usageRTOrDS))
       return D3DERR_INVALIDCALL;
-    
+
+    // RENDERTARGET and DEPTHSTENCIL in D3DPOOL_DEFAULT
+    // can not also have DYNAMIC usage
+    if (pDesc->Pool == D3DPOOL_DEFAULT &&
+        (pDesc->Usage & usageRTOrDS) &&
+        (pDesc->Usage & D3DUSAGE_DYNAMIC))
+      return D3DERR_INVALIDCALL;
+
+    const bool isPlainSurface = ResourceType == D3DRTYPE_SURFACE && !(pDesc->Usage & usageRTOrDS);
+    const bool isDepthStencilFormat = IsDepthStencilFormat(pDesc->Format);
+
+    // With the exception of image surfaces (d3d8)
+    // or plain offscreen surfaces (d3d9), depth stencil
+    // formats can only be used in D3DPOOL_DEFAULT
+    if (!isPlainSurface && pDesc->Pool != D3DPOOL_DEFAULT && isDepthStencilFormat)
+      return D3DERR_INVALIDCALL;
+
+    // Depth stencil formats can not have RENDERTARGET
+    // usage, and nothing except depth stencil formats
+    // can have DEPTHSTENCIL usage
+    if (( isDepthStencilFormat && (pDesc->Usage & D3DUSAGE_RENDERTARGET)) ||
+        (!isDepthStencilFormat && (pDesc->Usage & D3DUSAGE_DEPTHSTENCIL)))
+      return D3DERR_INVALIDCALL;
+
+    // Volume textures can not be used as render targets
+    if (ResourceType == D3DRTYPE_VOLUMETEXTURE &&
+        (pDesc->Usage & D3DUSAGE_RENDERTARGET))
+      return D3DERR_INVALIDCALL;
+
+    // Volume textures in D3DPOOL_SCRATCH must not have DYNAMIC usage
+    if (ResourceType == D3DRTYPE_VOLUMETEXTURE
+      && pDesc->Pool == D3DPOOL_SCRATCH
+      && (pDesc->Usage & D3DUSAGE_DYNAMIC))
+      return D3DERR_INVALIDCALL;
+
     // Use the maximum possible mip level count if the supplied
     // mip level count is either unspecified (0) or invalid
     const uint32_t maxMipLevelCount = pDesc->MultiSample <= D3DMULTISAMPLE_NONMASKABLE
@@ -196,13 +231,13 @@ namespace dxvk {
       pDesc->MipLevels = maxMipLevelCount;
 
     if (unlikely(pDesc->Discard)) {
-      if (!IsDepthStencilFormat(pDesc->Format))
+      if (!isDepthStencilFormat)
         return D3DERR_INVALIDCALL;
 
       if (pDesc->Format == D3D9Format::D32_LOCKABLE
-        || pDesc->Format == D3D9Format::D32F_LOCKABLE
-        || pDesc->Format == D3D9Format::D16_LOCKABLE
-        || pDesc->Format == D3D9Format::S8_LOCKABLE)
+       || pDesc->Format == D3D9Format::D32F_LOCKABLE
+       || pDesc->Format == D3D9Format::D16_LOCKABLE
+       || pDesc->Format == D3D9Format::S8_LOCKABLE)
         return D3DERR_INVALIDCALL;
     }
 
@@ -322,7 +357,6 @@ namespace dxvk {
       imageInfo.sharing.mode = (*pSharedHandle == INVALID_HANDLE_VALUE || *pSharedHandle == nullptr)
         ? DxvkSharedHandleMode::Export
         : DxvkSharedHandleMode::Import;
-      imageInfo.sharing.type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT;
       imageInfo.sharing.handle = *pSharedHandle;
       imageInfo.shared = true;
       // TODO: validate metadata?
@@ -331,6 +365,7 @@ namespace dxvk {
     if (m_mapping.ConversionFormatInfo.FormatType != D3D9ConversionFormat_None) {
       imageInfo.usage  |= VK_IMAGE_USAGE_STORAGE_BIT;
       imageInfo.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      imageInfo.shared = true;
     }
 
     DecodeMultiSampleType(m_device->GetDXVKDevice(), m_desc.MultiSample, m_desc.MultisampleQuality, &imageInfo.sampleCount);
@@ -492,8 +527,6 @@ namespace dxvk {
 
 
   VkImageLayout D3D9CommonTexture::OptimizeLayout(VkImageUsageFlags Usage) const {
-    const VkImageUsageFlags usageFlags = Usage;
-    
     // Filter out unnecessary flags. Transfer operations
     // are handled by the backend in a transparent manner.
     // Feedback loops are handled by hazard tracking.
@@ -517,8 +550,12 @@ namespace dxvk {
     if (Usage == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
       return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+    // Fall back to GENERAL if the image is not shader-readable
+    if (!(Usage & VK_IMAGE_USAGE_SAMPLED_BIT))
+      return VK_IMAGE_LAYOUT_GENERAL;
+
     // Otherwise, pick a layout that can be used for reading.
-    return usageFlags & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+    return (Usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
       ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   }

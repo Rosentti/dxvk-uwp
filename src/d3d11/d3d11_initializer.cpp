@@ -77,6 +77,33 @@ namespace dxvk {
   }
 
 
+  void D3D11Initializer::InitShaderIcb(
+          D3D11CommonShader*          pShader,
+          size_t                      IcbSize,
+    const void*                       pIcbData) {
+    std::lock_guard<dxvk::mutex> lock(m_mutex);
+    m_transferCommands += 1;
+
+    auto icbSlice = pShader->GetIcb();
+    auto srcSlice = m_stagingBuffer.alloc(icbSlice.length());
+
+    std::memcpy(srcSlice.mapPtr(0), pIcbData, IcbSize);
+
+    if (IcbSize < icbSlice.length())
+      std::memset(srcSlice.mapPtr(IcbSize), 0, icbSlice.length() - IcbSize);
+
+    EmitCs([
+      cIcbSlice = std::move(icbSlice),
+      cSrcSlice = std::move(srcSlice)
+    ] (DxvkContext* ctx) {
+      ctx->copyBuffer(cIcbSlice.buffer(), cIcbSlice.offset(),
+        cSrcSlice.buffer(), cSrcSlice.offset(), cIcbSlice.length());
+    });
+
+    ThrottleAllocationLocked();
+  }
+
+
   void D3D11Initializer::InitDeviceLocalBuffer(
           D3D11Buffer*                pBuffer,
     const D3D11_SUBRESOURCE_DATA*     pInitialData) {
@@ -118,18 +145,10 @@ namespace dxvk {
     // If the buffer is mapped, we can write data directly
     // to the mapped memory region instead of doing it on
     // the GPU. Same goes for zero-initialization.
-    DxvkBufferSlice bufferSlice = pBuffer->GetBufferSlice();
-
-    if (pInitialData != nullptr && pInitialData->pSysMem != nullptr) {
-      std::memcpy(
-        bufferSlice.mapPtr(0),
-        pInitialData->pSysMem,
-        bufferSlice.length());
-    } else {
-      std::memset(
-        bufferSlice.mapPtr(0), 0,
-        bufferSlice.length());
-    }
+    if (pInitialData && pInitialData->pSysMem)
+      std::memcpy(pBuffer->GetMapPtr(), pInitialData->pSysMem, pBuffer->Desc()->ByteWidth);
+    else
+      std::memset(pBuffer->GetMapPtr(), 0, pBuffer->Desc()->ByteWidth);
   }
 
 
@@ -140,8 +159,6 @@ namespace dxvk {
     
     // Image migt be null if this is a staging resource
     Rc<DxvkImage> image = pTexture->GetImage();
-
-    auto mapMode = pTexture->GetMapMode();
     auto desc = pTexture->Desc();
 
     VkFormat packedFormat = m_parent->LookupPackedFormat(desc->Format, pTexture->GetFormatMode()).Format;
@@ -151,7 +168,7 @@ namespace dxvk {
       // Compute data size for all subresources and allocate staging buffer memory
       DxvkBufferSlice stagingSlice;
 
-      if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+      if (pTexture->HasImage()) {
         VkDeviceSize dataSize = 0u;
 
         for (uint32_t mip = 0; mip < image->info().mipLevels; mip++) {
@@ -171,7 +188,7 @@ namespace dxvk {
           uint32_t index = D3D11CalcSubresource(mip, layer, desc->MipLevels);
           VkExtent3D mipLevelExtent = pTexture->MipLevelExtent(mip);
 
-          if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+          if (pTexture->HasImage()) {
             VkDeviceSize mipSizePerLayer = util::computeImageDataSize(
               packedFormat, image->mipLevelExtent(mip), formatInfo->aspectMask);
 
@@ -184,8 +201,8 @@ namespace dxvk {
             dataOffset += align(mipSizePerLayer, CACHE_LINE_SIZE);
           }
 
-          if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
-            util::packImageData(pTexture->GetMappedBuffer(index)->mapPtr(0),
+          if (pTexture->HasPersistentBuffers()) {
+            util::packImageData(pTexture->GetMapPtr(index, 0),
               pInitialData[index].pSysMem, pInitialData[index].SysMemPitch, pInitialData[index].SysMemSlicePitch,
               0, 0, pTexture->GetVkImageType(), mipLevelExtent, 1, formatInfo, formatInfo->aspectMask);
           }
@@ -193,7 +210,7 @@ namespace dxvk {
       }
 
       // Upload all subresources of the image in one go
-      if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+      if (pTexture->HasImage()) {
         EmitCs([
           cImage        = std::move(image),
           cStagingSlice = std::move(stagingSlice),
@@ -206,7 +223,7 @@ namespace dxvk {
         });
       }
     } else {
-      if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_STAGING) {
+      if (pTexture->HasImage()) {
         m_transferCommands += 1;
         
         // While the Microsoft docs state that resource contents are
@@ -215,16 +232,14 @@ namespace dxvk {
         EmitCs([
           cImage = std::move(image)
         ] (DxvkContext* ctx) {
-          ctx->initImage(cImage,
-            cImage->getAvailableSubresources(),
-            VK_IMAGE_LAYOUT_UNDEFINED);
+          ctx->initImage(cImage, VK_IMAGE_LAYOUT_UNDEFINED);
         });
       }
 
-      if (mapMode != D3D11_COMMON_TEXTURE_MAP_MODE_NONE) {
+      if (pTexture->HasPersistentBuffers()) {
         for (uint32_t i = 0; i < pTexture->CountSubresources(); i++) {
-          auto buffer = pTexture->GetMappedBuffer(i);
-          std::memset(buffer->mapPtr(0), 0, buffer->info().size);
+          auto layout = pTexture->GetSubresourceLayout(formatInfo->aspectMask, i);
+          std::memset(pTexture->GetMapPtr(i, layout.Offset), 0, layout.Size);
         }
       }
     }
@@ -237,38 +252,47 @@ namespace dxvk {
           D3D11CommonTexture*         pTexture,
     const D3D11_SUBRESOURCE_DATA*     pInitialData) {
     Rc<DxvkImage> image = pTexture->GetImage();
+    auto formatInfo = image->formatInfo();
 
-    for (uint32_t layer = 0; layer < image->info().numLayers; layer++) {
-      for (uint32_t level = 0; level < image->info().mipLevels; level++) {
+    for (uint32_t layer = 0; layer < pTexture->Desc()->ArraySize; layer++) {
+      for (uint32_t level = 0; level < pTexture->Desc()->MipLevels; level++) {
+        uint32_t subresourceIndex = D3D11CalcSubresource(level, layer, pTexture->Desc()->MipLevels);
+
         VkImageSubresource subresource;
-        subresource.aspectMask = image->formatInfo()->aspectMask;
+        subresource.aspectMask = formatInfo->aspectMask;
         subresource.mipLevel   = level;
         subresource.arrayLayer = layer;
 
         VkExtent3D blockCount = util::computeBlockCount(
-          image->mipLevelExtent(level),
-          image->formatInfo()->blockSize);
+          image->mipLevelExtent(level), formatInfo->blockSize);
 
-        VkSubresourceLayout layout = image->querySubresourceLayout(subresource);
+        auto layout = pTexture->GetSubresourceLayout(
+          subresource.aspectMask, subresourceIndex);
 
-        auto initialData = pInitialData
-          ? &pInitialData[D3D11CalcSubresource(level, layer, image->info().mipLevels)]
-          : nullptr;
+        if (pInitialData && pInitialData[subresourceIndex].pSysMem) {
+          const auto& initialData = pInitialData[subresourceIndex];
 
-        for (uint32_t z = 0; z < blockCount.depth; z++) {
-          for (uint32_t y = 0; y < blockCount.height; y++) {
-            auto size = blockCount.width * image->formatInfo()->elementSize;
-            auto dst = image->mapPtr(layout.offset + y * layout.rowPitch + z * layout.depthPitch);
+          for (uint32_t z = 0; z < blockCount.depth; z++) {
+            for (uint32_t y = 0; y < blockCount.height; y++) {
+              auto size = blockCount.width * formatInfo->elementSize;
 
-            if (initialData) {
-              auto src = reinterpret_cast<const char*>(initialData->pSysMem)
-                       + y * initialData->SysMemPitch
-                       + z * initialData->SysMemSlicePitch;
+              auto dst = pTexture->GetMapPtr(subresourceIndex, layout.Offset
+                      + y * layout.RowPitch
+                      + z * layout.DepthPitch);
+
+              auto src = reinterpret_cast<const char*>(initialData.pSysMem)
+                      + y * initialData.SysMemPitch
+                      + z * initialData.SysMemSlicePitch;
+
               std::memcpy(dst, src, size);
-            } else {
-              std::memset(dst, 0, size);
+
+              if (size < layout.RowPitch)
+                std::memset(reinterpret_cast<char*>(dst) + size, 0, layout.RowPitch - size);
             }
           }
+        } else {
+          void* dst = pTexture->GetMapPtr(subresourceIndex, layout.Offset);
+          std::memset(dst, 0, layout.Size);
         }
       }
     }
@@ -279,9 +303,7 @@ namespace dxvk {
     EmitCs([
       cImage = std::move(image)
     ] (DxvkContext* ctx) {
-      ctx->initImage(cImage,
-        cImage->getAvailableSubresources(),
-        VK_IMAGE_LAYOUT_PREINITIALIZED);
+      ctx->initImage(cImage, VK_IMAGE_LAYOUT_PREINITIALIZED);
     });
 
     m_transferCommands += 1;
@@ -338,7 +360,7 @@ namespace dxvk {
       cSignalValue  = stats.allocatedTotal
     ] (DxvkContext* ctx) {
       ctx->signal(cSignal, cSignalValue);
-      ctx->flushCommandList(nullptr);
+      ctx->flushCommandList(nullptr, nullptr);
     });
 
     FlushCsChunk();
@@ -354,10 +376,7 @@ namespace dxvk {
     // Ensure that initialization commands are submitted and waited on before
     // returning control to the application in order to avoid race conditions
     // in case the texture is used immediately on a secondary device.
-    auto mapMode = pResource->GetMapMode();
-
-    if (mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_NONE
-     || mapMode == D3D11_COMMON_TEXTURE_MAP_MODE_BUFFER) {
+    if (pResource->HasImage()) {
       ExecuteFlush();
 
       m_device->waitForResource(*pResource->GetImage(), DxvkAccess::Write);
@@ -375,7 +394,7 @@ namespace dxvk {
 
 
   void D3D11Initializer::FlushCsChunkLocked() {
-    m_parent->GetContext()->InjectCsChunk(std::move(m_csChunk), false);
+    m_parent->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(m_csChunk), false);
     m_csChunk = m_parent->AllocCsChunk(DxvkCsChunkFlag::SingleUse);
   }
 

@@ -101,9 +101,7 @@ namespace dxvk {
     EmitCs([
       cImage = std::move(image)
     ] (DxvkContext* ctx) {
-      ctx->initImage(cImage,
-        cImage->getAvailableSubresources(),
-        VK_IMAGE_LAYOUT_UNDEFINED);
+      ctx->initImage(cImage, VK_IMAGE_LAYOUT_UNDEFINED);
     });
 
     ThrottleAllocationLocked();
@@ -162,7 +160,7 @@ namespace dxvk {
 
   void D3D9Initializer::ExecuteFlushLocked() {
     EmitCs([] (DxvkContext* ctx) {
-      ctx->flushCommandList(nullptr);
+      ctx->flushCommandList(nullptr, nullptr);
     });
 
     FlushCsChunk();

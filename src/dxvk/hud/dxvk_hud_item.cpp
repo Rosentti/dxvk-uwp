@@ -112,7 +112,7 @@ namespace dxvk::hud {
 
 
   HudClientApiItem::HudClientApiItem(std::string api)
-  : m_api(api) {
+  : m_api(std::move(api)) {
 
   }
 
@@ -128,6 +128,8 @@ namespace dxvk::hud {
     const HudOptions&         options,
           HudRenderer&        renderer,
           HudPos              position) {
+    std::lock_guard lock(m_mutex);
+
     position.y += 16;
     renderer.drawText(16, position, 0xffffffffu, m_api);
 
@@ -217,8 +219,8 @@ namespace dxvk::hud {
     m_gfxPipelineLayout (createPipelineLayout()) {
     createComputePipeline(*renderer);
 
-    renderer->createShaderModule(m_vs, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_graph_vert), hud_graph_vert);
-    renderer->createShaderModule(m_fs, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_graph_frag), hud_graph_frag);
+    renderer->initShader(m_vs, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_graph_vert), hud_graph_vert);
+    renderer->initShader(m_fs, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_graph_frag), hud_graph_frag);
   }
 
 
@@ -227,9 +229,6 @@ namespace dxvk::hud {
 
     for (const auto& p : m_gfxPipelines)
       vk->vkDestroyPipeline(vk->device(), p.second, nullptr);
-
-    vk->vkDestroyShaderModule(vk->device(), m_vs.stageInfo.module, nullptr);
-    vk->vkDestroyShaderModule(vk->device(), m_fs.stageInfo.module, nullptr);
 
     vk->vkDestroyPipeline(vk->device(), m_computePipeline, nullptr);
     vk->vkDestroyPipelineLayout(vk->device(), m_computePipelineLayout, nullptr);
@@ -277,6 +276,11 @@ namespace dxvk::hud {
           uint32_t            dataPoint,
           HudPos              minPos,
           HudPos              maxPos) {
+    if (unlikely(m_device->debugFlags().test(DxvkDebugFlag::Capture))) {
+      ctx.cmd->cmdBeginDebugUtilsLabel(DxvkCmdBuffer::InitBuffer,
+        vk::makeLabel(0xf0c0dc, "HUD frame time processing"));
+    }
+
     // Write current time stamp to the buffer
     DxvkBufferSliceHandle sliceHandle = m_gpuBuffer->getSliceHandle();
     std::pair<VkQueryPool, uint32_t> query = m_query->getQuery();
@@ -372,6 +376,9 @@ namespace dxvk::hud {
     renderer.drawTextIndirect(ctx, key, drawParamBuffer,
       drawInfoBuffer, textBufferView, 2u);
 
+    if (unlikely(m_device->debugFlags().test(DxvkDebugFlag::Capture)))
+      ctx.cmd->cmdEndDebugUtilsLabel(DxvkCmdBuffer::InitBuffer);
+
     // Make sure GPU resources are being kept alive as necessary
     ctx.cmd->track(m_gpuBuffer, DxvkAccess::Write);
     ctx.cmd->track(m_query);
@@ -445,6 +452,7 @@ namespace dxvk::hud {
                       | VK_ACCESS_INDIRECT_COMMAND_READ_BIT
                       | VK_ACCESS_SHADER_READ_BIT
                       | VK_ACCESS_SHADER_WRITE_BIT;
+    bufferInfo.debugName = "HUD frame time data";
 
     m_gpuBuffer = m_device->createBuffer(bufferInfo, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
 
@@ -518,7 +526,7 @@ namespace dxvk::hud {
       throw DxvkError(str::format("Failed to create frame time compute pipeline layout: ", vr));
 
     HudShaderModule shader = { };
-    renderer.createShaderModule(shader, VK_SHADER_STAGE_COMPUTE_BIT,
+    renderer.initShader(shader, VK_SHADER_STAGE_COMPUTE_BIT,
       sizeof(hud_frame_time_eval), hud_frame_time_eval);
 
     VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
@@ -531,8 +539,6 @@ namespace dxvk::hud {
 
     if (vr != VK_SUCCESS)
       throw DxvkError(str::format("Failed to create frame time compute pipeline: ", vr));
-
-    vk->vkDestroyShaderModule(vk->device(), shader.stageInfo.module, nullptr);
   }
 
 
@@ -789,10 +795,11 @@ namespace dxvk::hud {
     auto diffCounters = counters.diff(m_prevCounters);
 
     if (elapsed.count() >= UpdateInterval) {
-      m_gpCount = diffCounters.getCtr(DxvkStatCounter::CmdDrawCalls);
-      m_cpCount = diffCounters.getCtr(DxvkStatCounter::CmdDispatchCalls);
-      m_rpCount = diffCounters.getCtr(DxvkStatCounter::CmdRenderPassCount);
-      m_pbCount = diffCounters.getCtr(DxvkStatCounter::CmdBarrierCount);
+      m_drawCallCount   = diffCounters.getCtr(DxvkStatCounter::CmdDrawCalls);
+      m_drawCount       = diffCounters.getCtr(DxvkStatCounter::CmdDrawsMerged) + m_drawCallCount;
+      m_dispatchCount   = diffCounters.getCtr(DxvkStatCounter::CmdDispatchCalls);
+      m_renderPassCount = diffCounters.getCtr(DxvkStatCounter::CmdRenderPassCount);
+      m_barrierCount    = diffCounters.getCtr(DxvkStatCounter::CmdBarrierCount);
 
       m_lastUpdate = time;
     }
@@ -807,21 +814,25 @@ namespace dxvk::hud {
     const HudOptions&         options,
           HudRenderer&        renderer,
           HudPos              position) {
+    std::string drawCount = m_drawCount > m_drawCallCount
+      ? str::format(m_drawCallCount, " (", m_drawCount, ")")
+      : str::format(m_drawCallCount);
+
     position.y += 16;
     renderer.drawText(16, position, 0xffff8040, "Draw calls:");
-    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_gpCount));
+    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, drawCount);
     
     position.y += 20;
     renderer.drawText(16, position, 0xffff8040, "Dispatch calls:");
-    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_cpCount));
+    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_dispatchCount));
     
     position.y += 20;
     renderer.drawText(16, position, 0xffff8040, "Render passes:");
-    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_rpCount));
+    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_renderPassCount));
     
     position.y += 20;
     renderer.drawText(16, position, 0xffff8040, "Barriers:");
-    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_pbCount));
+    renderer.drawText(16, { position.x + 192, position.y }, 0xffffffffu, str::format(m_barrierCount));
     
     position.y += 8;
     return position;
@@ -967,10 +978,10 @@ namespace dxvk::hud {
   : m_device          (device),
     m_setLayout       (createSetLayout()),
     m_pipelineLayout  (createPipelineLayout()) {
-    renderer->createShaderModule(m_fsBackground, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_chunk_frag_background), hud_chunk_frag_background);
-    renderer->createShaderModule(m_vsBackground, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_chunk_vert_background), hud_chunk_vert_background);
-    renderer->createShaderModule(m_fsVisualize, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_chunk_frag_visualize), hud_chunk_frag_visualize);
-    renderer->createShaderModule(m_vsVisualize, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_chunk_vert_visualize), hud_chunk_vert_visualize);
+    renderer->initShader(m_fsBackground, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_chunk_frag_background), hud_chunk_frag_background);
+    renderer->initShader(m_vsBackground, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_chunk_vert_background), hud_chunk_vert_background);
+    renderer->initShader(m_fsVisualize, VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(hud_chunk_frag_visualize), hud_chunk_frag_visualize);
+    renderer->initShader(m_vsVisualize, VK_SHADER_STAGE_VERTEX_BIT, sizeof(hud_chunk_vert_visualize), hud_chunk_vert_visualize);
   }
 
 
@@ -981,12 +992,6 @@ namespace dxvk::hud {
       vk->vkDestroyPipeline(vk->device(), p.second.background, nullptr);
       vk->vkDestroyPipeline(vk->device(), p.second.visualize, nullptr);
     }
-
-    vk->vkDestroyShaderModule(vk->device(), m_vsBackground.stageInfo.module, nullptr);
-    vk->vkDestroyShaderModule(vk->device(), m_fsBackground.stageInfo.module, nullptr);
-
-    vk->vkDestroyShaderModule(vk->device(), m_vsVisualize.stageInfo.module, nullptr);
-    vk->vkDestroyShaderModule(vk->device(), m_fsVisualize.stageInfo.module, nullptr);
 
     vk->vkDestroyPipelineLayout(vk->device(), m_pipelineLayout, nullptr);
     vk->vkDestroyDescriptorSetLayout(vk->device(), m_setLayout, nullptr);
@@ -1096,7 +1101,7 @@ namespace dxvk::hud {
       }
 
       // Render descriptive text
-      std::string headline = str::format("Mem type ", i, " [", type.properties.heapIndex, "]: ",
+      std::string headline = str::format("Mem type ", (i - 1), " [", type.properties.heapIndex, "]: ",
         type.chunkCount, " chunk", type.chunkCount != 1u ? "s" : "", " (", (stats.memoryAllocated >> 20u), " MB, ",
         ((stats.memoryUsed >= (1u << 20u)) ? stats.memoryUsed >> 20 : stats.memoryUsed >> 10),
         (stats.memoryUsed >= (1u << 20u) ? " MB" : " kB"), " used)");
@@ -1122,8 +1127,11 @@ namespace dxvk::hud {
     draw.w = size.x;
     draw.h = size.y;
     draw.pageMask = chunk.pageMaskOffset;
-    draw.pageCount = chunk.pageCount;
+    draw.pageCountAndActiveBit = chunk.pageCount;
     draw.color = color;
+
+    if (chunk.active)
+      draw.pageCountAndActiveBit |= 1u << 15;
   }
 
 
@@ -1200,6 +1208,7 @@ namespace dxvk::hud {
       bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
       bufferInfo.access = VK_ACCESS_SHADER_READ_BIT;
       bufferInfo.stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+      bufferInfo.debugName = "HUD memory data";
 
       m_dataBuffer = m_device->createBuffer(bufferInfo,
         VK_MEMORY_HEAP_DEVICE_LOCAL_BIT |
@@ -1426,6 +1435,17 @@ namespace dxvk::hud {
         ? str::format(m_maxCsSyncCount, " (", (syncTicks / 10), ".", (syncTicks % 10), " ms)")
         : str::format(m_maxCsSyncCount);
 
+      uint64_t currCsIdleTicks = counters.getCtr(DxvkStatCounter::CsIdleTicks);
+
+      m_diffCsIdleTicks = currCsIdleTicks - m_prevCsIdleTicks;
+      m_prevCsIdleTicks = currCsIdleTicks;
+
+      uint64_t busyTicks = ticks > m_diffCsIdleTicks
+        ? uint64_t(ticks - m_diffCsIdleTicks)
+        : uint64_t(0);
+
+      m_csLoadString = str::format((100 * busyTicks) / ticks, "%");
+
       m_maxCsSyncCount = 0;
       m_maxCsSyncTicks = 0;
 
@@ -1448,6 +1468,10 @@ namespace dxvk::hud {
     position.y += 20;
     renderer.drawText(16, position, 0xff40ff40, "CS syncs:");
     renderer.drawText(16, { position.x + 132, position.y }, 0xffffffffu, m_csSyncString);
+
+    position.y += 20;
+    renderer.drawText(16, position, 0xff40ff40, "CS load:");
+    renderer.drawText(16, { position.x + 132, position.y }, 0xffffffffu, m_csLoadString);
 
     position.y += 8;
     return position;
@@ -1573,6 +1597,86 @@ namespace dxvk::hud {
 
     return (uint32_t(m_tasksDone - m_offset) * 100)
          / (uint32_t(m_tasksTotal - m_offset));
+  }
+
+
+
+  HudLatencyItem::HudLatencyItem() {
+
+  }
+
+
+  HudLatencyItem::~HudLatencyItem() {
+
+  }
+
+
+  void HudLatencyItem::accumulateStats(const DxvkLatencyStats& stats) {
+    std::lock_guard lock(m_mutex);
+
+    if (stats.frameLatency.count()) {
+      m_accumStats.frameLatency += stats.frameLatency;
+      m_accumStats.sleepDuration += stats.sleepDuration;
+
+      m_accumFrames += 1u;
+    } else {
+      m_accumStats = { };
+      m_accumFrames = 0u;
+    }
+  }
+
+
+  void HudLatencyItem::update(dxvk::high_resolution_clock::time_point time) {
+    uint64_t ticks = std::chrono::duration_cast<std::chrono::microseconds>(time - m_lastUpdate).count();
+
+    if (ticks >= UpdateInterval) {
+      std::lock_guard lock(m_mutex);
+
+      if (m_accumFrames) {
+        uint32_t latency = (m_accumStats.frameLatency / m_accumFrames).count() / 100u;
+        uint32_t sleep = (m_accumStats.sleepDuration / m_accumFrames).count() / 100u;
+
+        m_latencyString = str::format(latency / 10, ".", latency % 10, " ms");
+        m_sleepString = str::format(sleep / 10, ".", sleep % 10, " ms");
+
+        m_accumStats = { };
+        m_accumFrames = 0u;
+
+        m_invalidUpdates = 0u;
+      } else {
+        m_latencyString = "--";
+        m_sleepString = "--";
+
+        if (m_invalidUpdates < MaxInvalidUpdates)
+          m_invalidUpdates += 1u;
+      }
+
+      m_lastUpdate = time;
+    }
+  }
+
+
+  HudPos HudLatencyItem::render(
+    const DxvkContextObjects& ctx,
+    const HudPipelineKey&     key,
+    const HudOptions&         options,
+          HudRenderer&        renderer,
+          HudPos              position) {
+    if (m_invalidUpdates >= MaxInvalidUpdates)
+      return position;
+
+    position.y += 16;
+
+    renderer.drawText(16, position, 0xffff60a0u, "Latency: ");
+    renderer.drawText(16, { position.x + 108, position.y }, 0xffffffffu, m_latencyString);
+
+    position.y += 20;
+
+    renderer.drawText(16, position, 0xffff60a0u, "Sleep: ");
+    renderer.drawText(16, { position.x + 108, position.y }, 0xffffffffu, m_sleepString);
+
+    position.y += 8;
+    return position;
   }
 
 }

@@ -1,5 +1,7 @@
 #include "dxvk_device.h"
 #include "dxvk_instance.h"
+#include "dxvk_latency_builtin.h"
+#include "dxvk_latency_reflex.h"
 
 namespace dxvk {
   
@@ -14,6 +16,7 @@ namespace dxvk {
     m_instance          (instance),
     m_adapter           (adapter),
     m_vkd               (vkd),
+    m_debugFlags        (instance->debugFlags()),
     m_queues            (queues),
     m_features          (features),
     m_properties        (adapter->devicePropertiesExt()),
@@ -39,6 +42,44 @@ namespace dxvk {
     // Stop workers explicitly in order to prevent
     // access to structures that are being destroyed.
     m_objects.pipelineManager().stopWorkerThreads();
+  }
+
+
+  VkSubresourceLayout DxvkDevice::queryImageSubresourceLayout(
+    const DxvkImageCreateInfo&        createInfo,
+    const VkImageSubresource&         subresource) {
+    VkImageFormatListCreateInfo formatList = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO };
+
+    VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    info.flags = createInfo.flags;
+    info.imageType = createInfo.type;
+    info.format = createInfo.format;
+    info.extent = createInfo.extent;
+    info.mipLevels = createInfo.mipLevels;
+    info.arrayLayers = createInfo.numLayers;
+    info.samples = createInfo.sampleCount;
+    info.tiling = VK_IMAGE_TILING_LINEAR;
+    info.usage = createInfo.usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+
+    if (createInfo.viewFormatCount && (createInfo.viewFormatCount > 1u || createInfo.viewFormats[0] != createInfo.format)) {
+      formatList.viewFormatCount = createInfo.viewFormatCount;
+      formatList.pViewFormats = createInfo.viewFormats;
+
+      info.pNext = &formatList;
+    }
+
+    VkImageSubresource2KHR subresourceInfo = { VK_STRUCTURE_TYPE_IMAGE_SUBRESOURCE_2_KHR };
+    subresourceInfo.imageSubresource = subresource;
+
+    VkDeviceImageSubresourceInfoKHR query = { VK_STRUCTURE_TYPE_DEVICE_IMAGE_SUBRESOURCE_INFO_KHR };
+    query.pCreateInfo = &info;
+    query.pSubresource = &subresourceInfo;
+
+    VkSubresourceLayout2KHR layout = { VK_STRUCTURE_TYPE_SUBRESOURCE_LAYOUT_2_KHR };
+    m_vkd->vkGetDeviceImageSubresourceLayoutKHR(m_vkd->device(), &query, &layout);
+    return layout.subresourceLayout;
   }
 
 
@@ -113,14 +154,6 @@ namespace dxvk {
 
     return result;
   }
-
-
-  DxvkDeviceOptions DxvkDevice::options() const {
-    DxvkDeviceOptions options;
-    options.maxNumDynamicUniformBuffers = m_properties.core.properties.limits.maxDescriptorSetUniformBuffersDynamic;
-    options.maxNumDynamicStorageBuffers = m_properties.core.properties.limits.maxDescriptorSetStorageBuffersDynamic;
-    return options;
-  }
   
   
   Rc<DxvkCommandList> DxvkDevice::createCommandList() {
@@ -133,8 +166,8 @@ namespace dxvk {
   }
 
 
-  Rc<DxvkContext> DxvkDevice::createContext(DxvkContextType type) {
-    return new DxvkContext(this, type);
+  Rc<DxvkContext> DxvkDevice::createContext() {
+    return new DxvkContext(this);
   }
 
 
@@ -258,18 +291,37 @@ namespace dxvk {
   }
 
 
+  Rc<DxvkLatencyTracker> DxvkDevice::createLatencyTracker(
+    const Rc<Presenter>&            presenter) {
+    if (m_options.latencySleep == Tristate::False)
+      return nullptr;
+
+    if (m_options.latencySleep == Tristate::Auto) {
+      if (m_features.nvLowLatency2)
+        return new DxvkReflexLatencyTrackerNv(presenter);
+      else
+        return nullptr;
+    }
+
+    return new DxvkBuiltInLatencyTracker(presenter,
+      m_options.latencyTolerance, m_features.nvLowLatency2);
+  }
+
+
   void DxvkDevice::presentImage(
     const Rc<Presenter>&            presenter,
-          VkPresentModeKHR          presentMode,
+    const Rc<DxvkLatencyTracker>&   tracker,
           uint64_t                  frameId,
           DxvkSubmitStatus*         status) {
-    status->result = VK_NOT_READY;
-
     DxvkPresentInfo presentInfo = { };
     presentInfo.presenter = presenter;
-    presentInfo.presentMode = presentMode;
     presentInfo.frameId = frameId;
-    m_submissionQueue.present(presentInfo, status);
+
+    DxvkLatencyInfo latencyInfo;
+    latencyInfo.tracker = tracker;
+    latencyInfo.frameId = frameId;
+
+    m_submissionQueue.present(presentInfo, latencyInfo, status);
     
     std::lock_guard<sync::Spinlock> statLock(m_statLock);
     m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
@@ -278,10 +330,17 @@ namespace dxvk {
 
   void DxvkDevice::submitCommandList(
     const Rc<DxvkCommandList>&      commandList,
+    const Rc<DxvkLatencyTracker>&   tracker,
+          uint64_t                  frameId,
           DxvkSubmitStatus*         status) {
     DxvkSubmitInfo submitInfo = { };
     submitInfo.cmdList = commandList;
-    m_submissionQueue.submit(submitInfo, status);
+
+    DxvkLatencyInfo latencyInfo;
+    latencyInfo.tracker = tracker;
+    latencyInfo.frameId = frameId;
+
+    m_submissionQueue.submit(submitInfo, latencyInfo, status);
 
     std::lock_guard<sync::Spinlock> statLock(m_statLock);
     m_statCounters.merge(commandList->statCounters());
@@ -297,6 +356,22 @@ namespace dxvk {
     }
 
     return result;
+  }
+
+
+  void DxvkDevice::waitForFence(sync::Fence& fence, uint64_t value) {
+    if (fence.value() >= value)
+      return;
+
+    auto t0 = dxvk::high_resolution_clock::now();
+
+    fence.wait(value);
+
+    auto t1 = dxvk::high_resolution_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0);
+
+    m_statCounters.addCtr(DxvkStatCounter::GpuSyncCount, 1);
+    m_statCounters.addCtr(DxvkStatCounter::GpuSyncTicks, us.count());
   }
 
 
@@ -335,9 +410,39 @@ namespace dxvk {
       && (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV_KHR)
        || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE_KHR)
        || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_PROPRIETARY_KHR));
-    hints.preferFbResolve = m_features.amdShaderFragmentMask
-      && (m_adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE_KHR)
-       || m_adapter->matchesDriver(VK_DRIVER_ID_AMD_PROPRIETARY_KHR));
+
+    // Older Nvidia drivers sometimes use the wrong format
+    // to interpret the clear color in render pass clears.
+    hints.renderPassClearFormatBug = m_adapter->matchesDriver(
+      VK_DRIVER_ID_NVIDIA_PROPRIETARY, Version(), Version(560, 28, 3));
+
+    // There's a similar bug that affects resolve attachments
+    hints.renderPassResolveFormatBug = m_adapter->matchesDriver(
+      VK_DRIVER_ID_NVIDIA_PROPRIETARY);
+
+    // On tilers we need to respect render passes some more. Most of
+    // these drivers probably can't run DXVK anyway, but might as well
+    bool tilerMode = m_adapter->matchesDriver(VK_DRIVER_ID_MESA_TURNIP)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_QUALCOMM_PROPRIETARY)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_HONEYKRISP)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_MOLTENVK)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_PANVK)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_ARM_PROPRIETARY)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_V3DV)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_BROADCOM_PROPRIETARY)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_PROPRIETARY);
+
+    applyTristate(tilerMode, m_options.tilerMode);
+    hints.preferRenderPassOps = tilerMode;
+
+    // Honeykrisp does not have native support for secondary command buffers
+    // and would suffer from added CPU overhead, so be less aggressive.
+    // TODO: Enable ANV once mesa issue 12791 is resolved.
+    // RADV has issues on RDNA4 up to version 25.0.1.
+    hints.preferPrimaryCmdBufs = m_adapter->matchesDriver(VK_DRIVER_ID_MESA_HONEYKRISP)
+                              || m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+                              || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV, Version(), Version(25, 0, 2));
     return hints;
   }
 

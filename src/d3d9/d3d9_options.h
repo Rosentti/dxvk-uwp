@@ -34,7 +34,7 @@ namespace dxvk {
     int32_t maxFrameRate;
 
     /// Set the max shader model the device can support in the caps.
-    int32_t shaderModel;
+    uint32_t shaderModel;
 
     /// Whether or not to set the process as DPI aware in Windows when the API interface is created.
     bool dpiAware;
@@ -49,10 +49,6 @@ namespace dxvk {
 
     /// Whether or not to do a fast path clear if we're close enough to the whole render target.
     bool lenientClear;
-
-    /// Back buffer count for the Vulkan swap chain.
-    /// Overrides buffer count in present parameters.
-    int32_t numBackBuffers;
 
     /// Defer surface creation
     bool deferSurfaceCreation;
@@ -102,9 +98,6 @@ namespace dxvk {
 
     /// Forced aspect ratio, disable other modes
     std::string forceAspectRatio;
-
-    /// Enable dialog mode (ie. no exclusive fullscreen)
-    bool enableDialogMode;
 
     /// Always use a spec constant to determine sampler type (instead of just in PS 1.x)
     /// Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
@@ -158,6 +151,9 @@ namespace dxvk {
 
     /// Enable depth texcoord Z (Dref) scaling (D3D8 quirk)
     int32_t drefScaling;
+
+    /// Add an extra front buffer to make GetFrontBufferData() work correctly when the swapchain only has a single buffer
+    bool extraFrontbuffer;
   };
 
 }

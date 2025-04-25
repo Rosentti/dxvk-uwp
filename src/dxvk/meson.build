@@ -28,6 +28,9 @@ dxvk_shaders = files([
   'shaders/dxvk_copy_depth_stencil_2d.frag',
   'shaders/dxvk_copy_depth_stencil_ms.frag',
 
+  'shaders/dxvk_cursor_vert.vert',
+  'shaders/dxvk_cursor_frag.frag',
+
   'shaders/dxvk_dummy_frag.frag',
 
   'shaders/dxvk_fullscreen_geom.geom',
@@ -47,7 +50,6 @@ dxvk_shaders = files([
   'shaders/dxvk_resolve_frag_d.frag',
   'shaders/dxvk_resolve_frag_ds.frag',
   'shaders/dxvk_resolve_frag_f.frag',
-  'shaders/dxvk_resolve_frag_f_amd.frag',
   'shaders/dxvk_resolve_frag_i.frag',
   'shaders/dxvk_resolve_frag_u.frag',
 
@@ -73,6 +75,7 @@ dxvk_src = [
   'dxvk_buffer.cpp',
   'dxvk_cmdlist.cpp',
   'dxvk_compute.cpp',
+  'dxvk_constant_state.cpp',
   'dxvk_context.cpp',
   'dxvk_cs.cpp',
   'dxvk_descriptor.cpp',
@@ -86,7 +89,10 @@ dxvk_src = [
   'dxvk_gpu_query.cpp',
   'dxvk_graphics.cpp',
   'dxvk_image.cpp',
+  'dxvk_implicit_resolve.cpp',
   'dxvk_instance.cpp',
+  'dxvk_latency_builtin.cpp',
+  'dxvk_latency_reflex.cpp',
   'dxvk_memory.cpp',
   'dxvk_meta_blit.cpp',
   'dxvk_meta_clear.cpp',

@@ -1,4 +1,5 @@
 #include <version.h>
+#include <buildenv.h>
 
 #include "dxvk_instance.h"
 #include "dxvk_openvr.h"
@@ -20,6 +21,7 @@ namespace dxvk {
   DxvkInstance::DxvkInstance(const DxvkInstanceImportInfo& args, DxvkInstanceFlags flags) {
     Logger::info(str::format("Game: ", env::getExeName()));
     Logger::info(str::format("DXVK: ", DXVK_VERSION));
+    Logger::info(str::format("Build: ", DXVK_TARGET, " ", DXVK_COMPILER, " ", DXVK_COMPILER_VERSION));
 
     wsi::init();
 
@@ -113,34 +115,34 @@ namespace dxvk {
 
   void DxvkInstance::createInstanceLoader(const DxvkInstanceImportInfo& args, DxvkInstanceFlags flags) {
     DxvkNameList layerList;
-    DxvkNameList extensionList;
-    DxvkNameSet extensionSet;
+    m_extensionSet = DxvkNameSet();
 
-    bool enablePerfEvents = false;
-    bool enableValidation = false;
+    DxvkDebugFlags debugFlags = 0u;
 
     if (args.instance) {
-      extensionList = DxvkNameList(args.extensionCount, args.extensionNames);
-      extensionSet = getExtensionSet(extensionList);
+      m_extensionNames = DxvkNameList(args.extensionCount, args.extensionNames);
+      m_extensionSet = getExtensionSet(m_extensionNames);
 
       auto extensionInfos = getExtensionList(m_extensions, true);
 
-      if (!extensionSet.enableExtensions(extensionInfos.size(), extensionInfos.data(), nullptr))
+      if (!m_extensionSet.enableExtensions(extensionInfos.size(), extensionInfos.data(), nullptr))
         throw DxvkError("DxvkInstance: Required instance extensions not enabled");
     } else {
       // Hide VK_EXT_debug_utils behind an environment variable.
       // This extension adds additional overhead to winevulkan.
       std::string debugEnv = env::getEnvVar("DXVK_DEBUG");
 
-      enablePerfEvents = debugEnv == "markers";
-      enableValidation = debugEnv == "validation";
+      if (debugEnv == "validation")
+        debugFlags.set(DxvkDebugFlag::Validation);
+      else if (debugEnv == "markers")
+        debugFlags.set(DxvkDebugFlag::Capture, DxvkDebugFlag::Markers);
+      else if (debugEnv == "capture" || m_options.enableDebugUtils)
+        debugFlags.set(DxvkDebugFlag::Capture);
 
-      bool enableDebug = enablePerfEvents || enableValidation || m_options.enableDebugUtils;
-
-      if (enableDebug) {
+      if (!debugFlags.isClear()) {
         Logger::warn("Debug Utils are enabled. May affect performance.");
 
-        if (enableValidation) {
+        if (debugFlags.test(DxvkDebugFlag::Validation)) {
           const char* layerName = "VK_LAYER_KHRONOS_validation";
           DxvkNameSet layers = DxvkNameSet::enumInstanceLayers(m_vkl);
 
@@ -156,21 +158,21 @@ namespace dxvk {
 
       // Get set of extensions to enable based on available
       // extensions and extension providers.
-      auto extensionInfos = getExtensionList(m_extensions, enableDebug);
+      auto extensionInfos = getExtensionList(m_extensions, !debugFlags.isClear());
       DxvkNameSet extensionsAvailable = DxvkNameSet::enumInstanceExtensions(m_vkl);
 
-      if (!extensionsAvailable.enableExtensions(extensionInfos.size(), extensionInfos.data(), &extensionSet))
+      if (!extensionsAvailable.enableExtensions(extensionInfos.size(), extensionInfos.data(), &m_extensionSet))
         throw DxvkError("DxvkInstance: Required instance extensions not supported");
 
       for (const auto& provider : m_extProviders)
-        extensionSet.merge(provider->getInstanceExtensions());
+        m_extensionSet.merge(provider->getInstanceExtensions());
 
       // Generate list of extensions to enable
-      extensionList = extensionSet.toNameList();
+      m_extensionNames = m_extensionSet.toNameList();
     }
 
     Logger::info("Enabled instance extensions:");
-    this->logNameList(extensionList);
+    this->logNameList(m_extensionNames);
 
     // If necessary, create a new Vulkan instance
     VkInstance instance = args.instance;
@@ -182,15 +184,15 @@ namespace dxvk {
       appInfo.pApplicationName      = appName.c_str();
       appInfo.applicationVersion    = flags.raw();
       appInfo.pEngineName           = "DXVK";
-      appInfo.engineVersion         = VK_MAKE_API_VERSION(0, 2, 4, 1);
+      appInfo.engineVersion         = VK_MAKE_API_VERSION(0, 2, 6, 1);
       appInfo.apiVersion            = VK_MAKE_API_VERSION(0, 1, 3, 0);
 
       VkInstanceCreateInfo info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
       info.pApplicationInfo         = &appInfo;
       info.enabledLayerCount        = layerList.count();
       info.ppEnabledLayerNames      = layerList.names();
-      info.enabledExtensionCount    = extensionList.count();
-      info.ppEnabledExtensionNames  = extensionList.names();
+      info.enabledExtensionCount    = m_extensionNames.count();
+      info.ppEnabledExtensionNames  = m_extensionNames.names();
 
       VkResult status = m_vkl->vkCreateInstance(&info, nullptr, &instance);
 
@@ -201,7 +203,7 @@ namespace dxvk {
     // Create the Vulkan instance loader
     m_vki = new vk::InstanceFn(m_vkl, !args.instance, instance);
 
-    if (enableValidation) {
+    if (debugFlags.test(DxvkDebugFlag::Validation)) {
       VkDebugUtilsMessengerCreateInfoEXT messengerInfo = { VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
       messengerInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT
                                     | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
@@ -213,6 +215,9 @@ namespace dxvk {
       if (m_vki->vkCreateDebugUtilsMessengerEXT(m_vki->instance(), &messengerInfo, nullptr, &m_messenger))
         Logger::err("DxvkInstance::createInstance: Failed to create debug messenger, proceeding without.");
     }
+
+    // Write back debug flags
+    m_debugFlags = debugFlags;
   }
 
 
